@@ -30,7 +30,8 @@
 | `GET /api/settings`, `PATCH /api/settings` | → `Settings` | |
 | `POST /api/budget/unblock` | → `{unblocked}` | После поднятия лимита или пополнения |
 | `GET /api/spend` | → `{budget: BudgetState, byBook, recent}` | |
-| `GET /api/status` | → `StatusView` | |
+| `GET /api/status` | → `StatusView` | Дорогих вызовов нет; ключ проверяется `models.retrieve` |
+| `GET /api/version` | → `{version, commit}` | Дёшево; для плашки «Есть новая версия» |
 | `POST /api/button-token` | → `{installUrl}` | Выпускает новый ключ кнопки, старый перестаёт работать |
 | `GET /u/:token/tolmach.user.js` (открыт по ключу) | → JS | Скрипт с вшитыми адресом и ключом |
 | `GET /api/cron` (открыт) | → `{resumed}` | Ежедневно: продолжить зависшие задачи; ничего не тратит сам по себе |
