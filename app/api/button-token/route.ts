@@ -1,8 +1,17 @@
 import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
-import { setSecret } from "@/lib/db/misc";
+import { getSecret, setSecret } from "@/lib/db/misc";
 import { newToken, sha256Hex } from "@/lib/server/auth";
 import { json, originOf, serverError } from "@/lib/server/http";
+
+/** Выпущен ли ключ кнопки (сам ключ не хранится и не показывается). */
+export async function GET() {
+  try {
+    return json({ exists: Boolean(await getSecret(await db(), "import_token_hash")) });
+  } catch (e) {
+    return serverError(e);
+  }
+}
 
 /** Выпустить новый ключ кнопки: старый перестаёт работать сразу. */
 export async function POST(req: NextRequest) {

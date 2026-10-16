@@ -141,6 +141,13 @@ export interface Job {
   termsExtracted: boolean;
   leaseUntil: string | null;
   attempt: number;
+  /** Повторы после временных ошибок на текущей части (не путать с attempt — тот растёт на каждой эстафете). */
+  retries: number;
+  /** Сколько заходов уже начинали текущую часть. */
+  chunkTries: number;
+  /** Сколько долларов задача держит в резерве бюджета прямо сейчас. */
+  reservedUsd: number;
+  reservedMonth: string | null;
   /** Код ошибки для экрана: см. ErrorCode. */
   errorCode: ErrorCode | null;
   errorMessage: string | null;

@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, errorText, getSettingsCached, saveSettings } from "@/lib/client/api";
-import { estimateRub } from "@/lib/client/format";
+import { estimateRub, rub } from "@/lib/client/format";
+import { estimateExtractionUsd } from "@/lib/core/cost";
 import { THEMES, THEME_BG, THEME_LABELS, applyTheme, currentTheme, type ThemeName } from "@/lib/client/prefs";
 import { MODELS, MODEL_IDS } from "@/lib/core/models";
 import type { Effort, ModelId, Settings } from "@/lib/types";
@@ -142,6 +143,7 @@ export default function SettingsScreen({ first }: { first: boolean }) {
                   selected={settings.translateModel === id}
                   usdRub={settings.usdRub}
                   effort={settings.translateEffort}
+                  extractModel={settings.extractModel}
                   onPick={() => void patch("translateModel", { translateModel: id })}
                 />
               ))}
@@ -173,7 +175,8 @@ export default function SettingsScreen({ first }: { first: boolean }) {
               </select>
               <span className="hint">
                 Перед переводом Толмач находит в главе имена и названия, чтобы переводить их везде одинаково. Это
-                дешёвая часть работы.
+                добавляет к главе {extractRub(settings.extractModel, settings.usdRub) ?? "немного"} — цены моделей
+                выше уже с этим.
               </span>
             </label>
 
@@ -300,16 +303,19 @@ function ModelCard({
   selected,
   usdRub,
   effort,
+  extractModel,
   onPick,
 }: {
   id: ModelId;
   selected: boolean;
   usdRub: number;
   effort: Effort;
+  extractModel: ModelId;
   onPick: () => void;
 }) {
   const spec = MODELS[id];
-  const price = estimateRub(id, TYPICAL_WORDS, usdRub, effort);
+  // Цена — вместе с поиском имён: именно столько спишется за главу.
+  const price = estimateRub(id, TYPICAL_WORDS, usdRub, effort, extractModel);
   return (
     <button type="button" role="radio" aria-checked={selected} className="choice" onClick={onPick}>
       <span className="choice-title">
@@ -319,4 +325,13 @@ function ModelCard({
       <span className="choice-sub">{spec.blurb}</span>
     </button>
   );
+}
+
+/** Сколько добавляет к главе поиск имён выбранной моделью. */
+function extractRub(model: ModelId, usdRub: number): string | null {
+  try {
+    return rub(estimateExtractionUsd(model, TYPICAL_WORDS), usdRub);
+  } catch {
+    return null;
+  }
 }

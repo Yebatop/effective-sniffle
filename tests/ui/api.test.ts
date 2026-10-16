@@ -123,6 +123,11 @@ describe("куда вернуться после входа", () => {
   it("только свои пути", () => {
     expect(safeNext("/book/1")).toBe("/book/1");
     expect(safeNext("//evil.example")).toBe("/");
+    // Браузер выбрасывает табуляции и переводы строк: «/\t/evil» стал бы «//evil».
+    expect(safeNext("/\t/evil.example")).toBe("/");
+    expect(safeNext("/\n/evil.example")).toBe("/");
+    expect(safeNext("/\\evil.example")).toBe("/");
+    expect(safeNext("/read/abc?x=1#p5")).toBe("/read/abc?x=1#p5");
     expect(safeNext("https://evil.example")).toBe("/");
     expect(safeNext("/\\evil")).toBe("/");
     expect(safeNext("/login?next=/x")).toBe("/");

@@ -238,6 +238,24 @@ export default function Reader({ chapterId }: { chapterId: string }) {
     };
   }, [jobId, polling]);
 
+  // Перевод остановился (ошибка, лимит, деньги на счёте) — показать то, что
+  // уже переведено и оплачено, и сколько это стоило. Иначе после перезагрузки
+  // страницы готовые абзацы и потраченное не видны вовсе.
+  const partialLoadedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!job || polling || !job.translationId || view?.translation) return;
+    if (partialLoadedFor.current === job.id) return;
+    partialLoadedFor.current = job.id;
+    api
+      .job(job.id, 0)
+      .then((r) => {
+        if (r.paragraphs?.length) setTranslated((m) => mergeTranslated(m, r.paragraphs));
+        seqRef.current = Math.max(seqRef.current, r.seq || 0);
+        setJobCost(r.costUsd || 0);
+      })
+      .catch(() => undefined);
+  }, [job, polling, view]);
+
   // Готово — перечитать главу целиком (чистовой текст, термины, «Дальше»).
   useEffect(() => {
     if (!job || job.state !== "done" || doneHandledFor.current === job.id) return;
@@ -443,7 +461,7 @@ export default function Reader({ chapterId }: { chapterId: string }) {
 
   const estimateText = view.estimate
     ? rub(view.estimate.usd, usdRub)
-    : estimateRub(settings?.translateModel, chapter.words, usdRub, settings?.translateEffort);
+    : estimateRub(settings?.translateModel, chapter.words, usdRub, settings?.translateEffort, settings?.extractModel);
   const estimateModel = view.estimate?.model ?? settings?.translateModel ?? null;
 
   const style = {

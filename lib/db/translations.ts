@@ -62,6 +62,17 @@ export async function finishTranslation(d: Db, translationId: string): Promise<v
   );
 }
 
+/** Продолжаем прерванную версию — она снова «в работе». */
+export async function reviveTranslation(d: Db, translationId: string): Promise<void> {
+  await d.query("update translations set status = 'in_progress' where id = $1 and status = 'failed'", [translationId]);
+}
+
+/** Какие абзацы этой версии уже готовы в диапазоне — их при продолжении не переводим. */
+export async function doneIdx(d: Db, translationId: string, from: number, to: number): Promise<Set<number>> {
+  const r = await d.query("select idx from translation_paragraphs where translation_id = $1 and idx between $2 and $3", [translationId, from, to]);
+  return new Set(r.rows.map((row) => Number(row.idx)));
+}
+
 export async function failTranslation(d: Db, translationId: string): Promise<void> {
   await d.query("update translations set status = 'failed' where id = $1", [translationId]);
 }

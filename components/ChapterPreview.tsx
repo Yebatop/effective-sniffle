@@ -74,7 +74,7 @@ export default function ChapterPreview({
   const last = paragraphs.length > 1 ? paragraphs[paragraphs.length - 1] : "";
   const words = chapter.words || 0;
   const price = useMemo(
-    () => (settings ? estimateRub(settings.translateModel, words, settings.usdRub, settings.translateEffort) : null),
+    () => (settings ? estimateRub(settings.translateModel, words, settings.usdRub, settings.translateEffort, settings.extractModel) : null),
     [settings, words],
   );
   const empty = paragraphs.length === 0;

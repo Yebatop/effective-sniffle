@@ -149,6 +149,14 @@ create table if not exists jobs (
   terms_extracted boolean not null default false,
   lease_until timestamptz,
   attempt int not null default 0,
+  -- Повторы после временных ошибок и заходы на текущую часть — отдельно от
+  -- attempt (тот растёт на каждой эстафете): обнуляются, когда часть готова.
+  retries int not null default 0,
+  chunk_tries int not null default 0,
+  -- Сколько этот исполнитель держит в резерве бюджета: если функцию убьют,
+  -- следующий заход вернёт резерв, а не оставит его висеть до конца месяца.
+  reserved_usd numeric(12,6) not null default 0,
+  reserved_month text,
   error_code text,
   error_message text,
   created_at timestamptz not null default now(),
@@ -206,7 +214,10 @@ create table if not exists reports (
 
 create table if not exists login_attempts (
   id bigserial primary key,
+  -- Неудачи считаются по адресу: иначе чужой мог бы закрыть вход владельцу.
+  ip text not null default '',
   ok boolean not null,
   created_at timestamptz not null default now()
 );
+create index if not exists login_attempts_ip on login_attempts(ip, created_at);
 `;

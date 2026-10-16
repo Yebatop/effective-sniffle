@@ -56,7 +56,7 @@ export default function NeighborNav({
       .chapter(next.chapterId)
       .then((v) => {
         if (v.estimate) setNextPrice(rub(v.estimate.usd, settings.usdRub));
-        else setNextPrice(estimateRub(settings.translateModel, v.chapter.words, settings.usdRub, settings.translateEffort));
+        else setNextPrice(estimateRub(settings.translateModel, v.chapter.words, settings.usdRub, settings.translateEffort, settings.extractModel));
       })
       .catch(() => undefined);
   }, [next.chapterId, next.translated, settings]);

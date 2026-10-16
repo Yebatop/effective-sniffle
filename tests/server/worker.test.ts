@@ -2,11 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { testDb, __setDbForTests, type Db } from "@/lib/db/client";
 import { importChapter, getChapter, getBook } from "@/lib/db/books";
 import { createOrGetJob, getJob } from "@/lib/db/jobs";
-import { budgetState, recentCalls } from "@/lib/db/money";
+import { budgetState, recentCalls, reserve } from "@/lib/db/money";
 import { saveSettings } from "@/lib/db/misc";
 import { listAddresses, listTerms } from "@/lib/db/terms";
 import { getParagraphsSince } from "@/lib/db/translations";
-import { runJob } from "@/lib/server/worker";
+import { runJob, startTranslation } from "@/lib/server/worker";
 import { __resetClientForTests, checkKey } from "@/lib/server/anthropic";
 import { startMockAnthropic } from "./mock-anthropic";
 import type { ExtractedChapter } from "@/lib/types";
@@ -30,6 +30,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await d.reset();
   mock.calls.length = 0;
+  mock.control.failNext = 0;
   await saveSettings(d, { translateModel: "claude-sonnet-5-5", monthlyLimitRub: 300, usdRub: 92 });
 });
 
@@ -183,6 +184,70 @@ describe("worker", () => {
     const { jobId } = await startJob(["One.", "Two."]);
     const [a, b] = await Promise.all([runJob(jobId), runJob(jobId)]);
     expect([a, b].sort()).toEqual(["busy", "done"]);
+  });
+
+  test("a runner replaced mid-stream steps aside: no false failure, the aborted call is still paid for", async () => {
+    const { chapterId, jobId } = await startJob(["SLOW_ME one.", "SLOW_ME two.", "SLOW_ME three.", "SLOW_ME four."]);
+    const running = runJob(jobId, { heartbeatMs: 40 });
+    // Пока поток идёт, задачу «перехватывает» другой исполнитель.
+    await new Promise((r) => setTimeout(r, 250));
+    await d.query("update jobs set attempt = attempt + 1 where id = $1", [jobId]);
+    expect(await running).toBe("busy");
+    const job = (await getJob(d, jobId))!;
+    expect(job.state).toBe("running"); // не затёрто в failed
+    const c = (await getChapter(d, chapterId))!;
+    expect(c.currentTranslationId).toBeNull();
+    const calls = await recentCalls(d, 10);
+    expect(calls.some((x) => x.purpose === "translate" && x.usage.inputTokens > 0)).toBe(true);
+    const budget = await budgetState(d, 300 / 92);
+    expect(budget.reservedUsd).toBeCloseTo(0, 6);
+  });
+
+  test("an answer served by a fallback model is priced and recorded, not crashed on", async () => {
+    const { chapterId, jobId } = await startJob(["FALLBACK_ME hard scene.", "Second."]);
+    expect(await runJob(jobId)).toBe("done");
+    const calls = await recentCalls(d, 10);
+    expect(calls.map((x) => x.model)).toContain("claude-sonnet-5");
+    expect(calls.every((x) => x.usd > 0)).toBe(true);
+    expect((await budgetState(d, 300 / 92)).reservedUsd).toBeCloseTo(0, 6);
+    expect((await translated(chapterId)).length).toBe(3);
+  });
+
+  test("«Повторить» after a failure continues the same translation instead of paying again", async () => {
+    const para = (i: number) => `Paragraph ${i}. ` + "The ferry crossed the wide grey river under a low sky ".repeat(10).trim();
+    const { chapterId, jobId } = await startJob(Array.from({ length: 40 }, (_, i) => para(i + 1)));
+    // Сбой ровно на третьем запросе к модели: 1 — разбор терминов, 2 — первая часть, 3 — вторая.
+    const watcher = setInterval(() => {
+      if (mock.calls.length === 2 && mock.control.failNext === 0) mock.control.failNext = 1;
+    }, 1);
+    const r1 = await runJob(jobId);
+    clearInterval(watcher);
+    expect(r1).toBe("failed");
+    const failed = (await getJob(d, jobId))!;
+    expect(failed.nextChunk).toBeGreaterThan(0);
+    const paidBefore = mock.calls.length;
+
+    const { jobId: retryId } = await startTranslation(chapterId);
+    expect(retryId).not.toBe(jobId);
+    const retryJob = (await getJob(d, retryId))!;
+    expect(retryJob.translationId).toBe(failed.translationId);
+    expect(retryJob.termsExtracted).toBe(true);
+    expect(await runJob(retryId)).toBe("done");
+    // Ни разбор терминов, ни готовые части не оплачивались второй раз.
+    const extra = mock.calls.slice(paidBefore);
+    expect(extra.every((c) => c.stream)).toBe(true);
+    expect(extra.length).toBe(retryJob.chunksTotal! - retryJob.nextChunk);
+    expect((await translated(chapterId)).map((p) => p.idx)).toEqual(Array.from({ length: 41 }, (_, i) => i));
+  });
+
+  test("a reservation left by a killed run is returned to the limit on the next run", async () => {
+    const { jobId } = await startJob(["One.", "Two."]);
+    // Как будто прошлый заход убили посреди вызова: резерв висит и в бюджете, и на задаче.
+    expect(await reserve(d, 0.5, 300 / 92)).toBe(true);
+    await d.query("update jobs set reserved_usd = 0.5, reserved_month = to_char(now() at time zone 'UTC', 'YYYY-MM') where id = $1", [jobId]);
+    expect(await runJob(jobId)).toBe("done");
+    expect((await budgetState(d, 300 / 92)).reservedUsd).toBeCloseTo(0, 6);
+    expect((await getJob(d, jobId))!.reservedUsd).toBeCloseTo(0, 6);
   });
 
   test("key check works without spending", async () => {

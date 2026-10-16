@@ -53,10 +53,11 @@ export function rubBare(usd: number, usdRub: number): string {
 }
 
 /** Оценка цены перевода главы или null, если посчитать не вышло. */
-export function estimateRub(model: ModelId | null | undefined, words: number, usdRub: number, effort?: Effort): string | null {
+/** Цена главы вместе с поиском имён (extractModel) — именно столько спишется. */
+export function estimateRub(model: ModelId | null | undefined, words: number, usdRub: number, effort?: Effort, extractModel?: ModelId | null): string | null {
   if (!model || !(model in MODELS) || !Number.isFinite(words) || words <= 0) return null;
   try {
-    const usd = estimateTranslationUsd(model, words, effort ? { effort } : undefined);
+    const usd = estimateTranslationUsd(model, words, { effort, extractModel: extractModel ?? undefined });
     if (!Number.isFinite(usd) || usd < 0) return null;
     return rub(usd, usdRub);
   } catch {

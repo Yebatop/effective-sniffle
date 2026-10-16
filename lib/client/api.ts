@@ -149,11 +149,22 @@ export function isOkFalse(body: unknown): body is { ok: false; code: string; mes
 }
 
 /** Куда вернуться после входа: только свой путь, без «//чужой-сайт». */
+/**
+ * Куда вернуться после входа — только внутрь приложения. Проверяем, куда
+ * адрес укажет на самом деле: браузер выбрасывает табуляции и переводы
+ * строк, и «/\t/evil.example» превратился бы в «//evil.example».
+ */
 export function safeNext(next: string | null | undefined): string {
   if (!next || typeof next !== "string") return "/";
-  if (!next.startsWith("/") || next.startsWith("//") || next.startsWith("/\\")) return "/";
-  if (next.startsWith("/login")) return "/";
-  return next;
+  if (/[\u0000-\u001f\\]/.test(next) || !next.startsWith("/") || next.startsWith("//")) return "/";
+  try {
+    const base = "https://tolmach.invalid";
+    const u = new URL(next, base);
+    if (u.origin !== base || u.pathname.startsWith("/login")) return "/";
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return "/";
+  }
 }
 
 export function loginHref(currentPath: string): string {
@@ -275,6 +286,7 @@ export function createApi(partial: Partial<ApiDeps> = {}) {
     status: () => request<StatusView>("GET", "/api/status"),
     version: () => request<VersionView>("GET", "/api/version", undefined, { silent401: true }),
     buttonToken: () => request<{ installUrl: string }>("POST", "/api/button-token", {}),
+    buttonTokenStatus: () => request<{ exists: boolean }>("GET", "/api/button-token"),
   };
 }
 

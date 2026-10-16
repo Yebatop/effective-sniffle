@@ -43,7 +43,7 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
     const model = settings.translateModel;
     const estimate = model
       ? (() => {
-          const usd = estimateTranslationUsd(model, chapter.words, { effort: settings.translateEffort });
+          const usd = estimateTranslationUsd(model, chapter.words, { effort: settings.translateEffort, extractModel: settings.extractModel });
           return { usd, rub: usd * settings.usdRub, model };
         })()
       : null;

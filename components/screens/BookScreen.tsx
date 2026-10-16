@@ -152,14 +152,15 @@ function BookSettings({ book, onSaved }: { book: Book; onSaved: (b: Book) => voi
     title: title.trim() || book.title,
     register,
     narratorPerson: person === "1" ? 1 : person === "3" ? 3 : null,
-    narratorGender: gender,
+    // «Не знаю» — это пусто, а не «unknown»: иначе Толмач перестанет сам определять род рассказчика.
+    narratorGender: gender === "unknown" ? null : gender,
     honorifics: honorifics.trim() ? honorifics.trim() : null,
   };
   const dirty =
     patch.title !== book.title ||
     patch.register !== book.register ||
     patch.narratorPerson !== book.narratorPerson ||
-    patch.narratorGender !== toNarratorGender(book.narratorGender) ||
+    (patch.narratorGender ?? null) !== (book.narratorGender === "m" || book.narratorGender === "f" ? book.narratorGender : null) ||
     (patch.honorifics ?? null) !== (book.honorifics ?? null);
 
   async function save(e: React.FormEvent) {

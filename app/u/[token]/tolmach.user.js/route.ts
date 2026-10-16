@@ -32,6 +32,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
     "// @description  Кнопка «Т» на страницах глав: отправить главу в Толмач и читать перевод",
     "// @match        *://*/*",
     "// @noframes",
+    // В изолированном мире дополнения: скрипты сайта не дотянутся до ключа кнопки.
+    "// @inject-into content",
     "// @run-at       document-idle",
     "// @grant        GM_xmlhttpRequest",
     "// @grant        GM_setValue",

@@ -30,7 +30,13 @@ export type TranslateOutcome =
   | { kind: "ok"; paragraphs: Array<{ idx: number; text: string }>; usage: Usage; model: string; stopReason: string }
   | { kind: "refused"; usage: Usage; model: string; category: string | null }
   | { kind: "truncated"; paragraphs: Array<{ idx: number; text: string }>; usage: Usage; model: string }
-  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage?: Usage; model?: string };
+  /**
+   * Поток прерван: вышел срок вызова, исполнителя сменили или упала запись
+   * абзаца. Уже выданные абзацы сохранены; usage — сколько успели потратить
+   * (выход оплачивается и у оборванного ответа). cause — исходная ошибка.
+   */
+  | { kind: "aborted"; paragraphs: Array<{ idx: number; text: string }>; usage: Usage; model: string; cause: unknown }
+  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string };
 
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
@@ -112,9 +118,15 @@ export async function translateChunk(
   effort: Effort,
   expected: { from: number; to: number },
   onParagraph: (p: { idx: number; text: string }) => Promise<void> | void,
+  opts?: { signal?: AbortSignal },
 ): Promise<TranslateOutcome> {
   let parser = createLabelParser(expected);
   const done = new Map<number, string>();
+  // Расход по событиям потока: если поток оборвётся, мы всё равно знаем,
+  // сколько входа и выхода уже оплачено.
+  let seen: RawUsage = {};
+  let served = model as string;
+  let callbackError: unknown = null;
   const emit = async (items: Array<{ idx: number; text: string }>) => {
     for (const item of items) {
       const text = polish(item.text);
@@ -131,13 +143,30 @@ export async function translateChunk(
     messages: req.messages,
     output_config: { effort },
   };
+  const options = opts?.signal ? { signal: opts.signal } : undefined;
 
   try {
     const stream = MODELS[model].serverFallback
-      ? anthropic().beta.messages.stream({ ...params, betas: [FALLBACK_BETA], fallbacks: "default" })
-      : anthropic().messages.stream(params);
+      ? anthropic().beta.messages.stream({ ...params, betas: [FALLBACK_BETA], fallbacks: "default" }, options)
+      : anthropic().messages.stream(params, options);
 
-    for await (const event of stream as AsyncIterable<{ type: string; content_block?: { type: string }; delta?: { type: string; text?: string } }>) {
+    type Event = {
+      type: string;
+      message?: { model?: string; usage?: RawUsage };
+      content_block?: { type: string };
+      delta?: { type: string; text?: string };
+      usage?: RawUsage;
+    };
+    for await (const event of stream as AsyncIterable<Event>) {
+      if (event.type === "message_start" && event.message) {
+        served = event.message.model ?? served;
+        seen = { ...seen, ...(event.message.usage ?? {}) };
+        continue;
+      }
+      if (event.type === "message_delta" && event.usage) {
+        seen = { ...seen, ...event.usage };
+        continue;
+      }
       if (event.type === "content_block_start" && event.content_block?.type === "fallback") {
         // Модель отказала посреди ответа, Anthropic продолжил другой моделью:
         // она переводит всё заново, а её абзацы заменят уже показанные.
@@ -145,9 +174,19 @@ export async function translateChunk(
         continue;
       }
       if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
-        await emit(parser.push(event.delta.text));
+        try {
+          await emit(parser.push(event.delta.text));
+        } catch (e) {
+          // Ошибка записи абзаца (или исполнителя сменили) — не ошибка
+          // Anthropic: прерываем поток и отдаём причину наверх как есть.
+          callbackError = e;
+          stream.abort();
+          break;
+        }
       }
     }
+    if (callbackError) return { kind: "aborted", paragraphs: toList(done), usage: toUsage(seen), model: served, cause: callbackError };
+
     const final = (await stream.finalMessage()) as unknown as {
       model: string;
       stop_reason: string | null;
@@ -162,10 +201,18 @@ export async function translateChunk(
       // Последний абзац оборван на полуслове — его не берём.
       return { kind: "truncated", paragraphs: toList(done), usage, model: final.model };
     }
-    await emit(parser.finish());
+    try {
+      await emit(parser.finish());
+    } catch (e) {
+      return { kind: "aborted", paragraphs: toList(done), usage, model: final.model, cause: e };
+    }
     return { kind: "ok", paragraphs: toList(done), usage, model: final.model, stopReason: final.stop_reason ?? "end_turn" };
   } catch (e) {
-    return { kind: "error", ...mapError(e) };
+    if (callbackError) return { kind: "aborted", paragraphs: toList(done), usage: toUsage(seen), model: served, cause: callbackError };
+    if (e instanceof Anthropic.APIUserAbortError || opts?.signal?.aborted) {
+      return { kind: "aborted", paragraphs: toList(done), usage: toUsage(seen), model: served, cause: e };
+    }
+    return { kind: "error", ...mapError(e), usage: toUsage(seen), model: served };
   }
 }
 
@@ -186,7 +233,8 @@ export interface ExtractionResult {
 export type ExtractOutcome =
   | { kind: "ok"; result: ExtractionResult; usage: Usage; model: string }
   | { kind: "refused"; usage: Usage; model: string }
-  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean };
+  /** usage есть и у ошибки: ответ, который не разобрался по схеме, всё равно оплачен. */
+  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string };
 
 const ExtractionSchema = z.object({
   terms: z.array(
@@ -244,7 +292,7 @@ export async function extractTerms(input: {
   known: Array<{ en: string; ru: string; kind: string; aliases: string[] }>;
   knownAddresses: Array<{ fromEn: string; toEn: string; form: "ty" | "vy" }>;
   isFirstChapterOfBook: boolean;
-}): Promise<ExtractOutcome> {
+}, opts?: { signal?: AbortSignal }): Promise<ExtractOutcome> {
   const known = [...input.known]
     .sort((a, b) => a.en.localeCompare(b.en))
     .map((t) => `${t.en} → ${t.ru} (${t.kind})${t.aliases.length ? ` [другие имена: ${t.aliases.join(", ")}]` : ""}`)
@@ -258,22 +306,37 @@ export async function extractTerms(input: {
     .filter(Boolean)
     .join("\n\n");
 
+  const format = zodOutputFormat(ExtractionSchema);
+  let usage: Usage = { ...ZERO_USAGE };
+  let served: string = input.model;
   try {
-    const response = await anthropic().messages.parse({
-      model: input.model,
-      max_tokens: 8000,
-      system: [{ type: "text", text: EXTRACT_INSTRUCTIONS, cache_control: { type: "ephemeral" } }],
-      messages: [{ role: "user", content: `${context}\n\nГЛАВА\n\n${input.chapterText}` }],
-      output_config: { effort: "low", format: zodOutputFormat(ExtractionSchema) },
-    });
-    const usage = toUsage(response.usage as RawUsage);
-    if (response.stop_reason === "refusal") return { kind: "refused", usage, model: response.model };
-    const parsed = response.parsed_output;
-    if (!parsed) return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: false };
+    // create, а не parse: если ответ не разберётся по схеме (например, оборван
+    // на max_tokens), parse бросил бы ошибку без usage — и оплаченный вызов
+    // пропал бы из учёта.
+    const response = await anthropic().messages.create(
+      {
+        model: input.model,
+        max_tokens: 8000,
+        system: [{ type: "text", text: EXTRACT_INSTRUCTIONS, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: `${context}\n\nГЛАВА\n\n${input.chapterText}` }],
+        output_config: { effort: "low", format: { type: format.type, schema: format.schema } },
+      },
+      opts?.signal ? { signal: opts.signal } : undefined,
+    );
+    usage = toUsage(response.usage as RawUsage);
+    served = response.model;
+    if (response.stop_reason === "refusal") return { kind: "refused", usage, model: served };
+    const text = response.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+    let parsed: z.infer<typeof ExtractionSchema>;
+    try {
+      parsed = format.parse(text);
+    } catch {
+      return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: false, usage, model: served };
+    }
     return {
       kind: "ok",
       usage,
-      model: response.model,
+      model: served,
       result: {
         terms: parsed.terms.map((t) => ({ en: t.en, ru: t.ru, kind: t.kind, gender: t.gender, aliases: t.aliases, note: t.note })),
         addresses: parsed.addresses.map((a) => ({ fromEn: a.from, toEn: a.to, form: a.form })),
@@ -284,7 +347,7 @@ export async function extractTerms(input: {
       },
     };
   } catch (e) {
-    return { kind: "error", ...mapError(e) };
+    return { kind: "error", ...mapError(e), usage, model: served };
   }
 }
 

@@ -5,7 +5,7 @@ import { createTranslation, upsertParagraph, getParagraphsSince, finishTranslati
 import { mergeProposals, listTerms, listAddresses, updateTerm } from "@/lib/db/terms";
 import { createOrGetJob, claimJob, heartbeat, setJobState, releaseJob, staleJobs, unblockJobs, liveJobForChapter } from "@/lib/db/jobs";
 import { reserve, settle, budgetState, recordApiCall, monthKey, spendByBook } from "@/lib/db/money";
-import { getSettings, saveSettings, savePosition, getPosition, createReport, getReportByToken, getSecret, setSecret, getOrCreateSecret, recordLoginAttempt, failedLoginsRecent } from "@/lib/db/misc";
+import { getSettings, saveSettings, savePosition, getPosition, createReport, getReportByToken, getSecret, setSecret, getOrCreateSecret, beginLoginAttempt, loginSucceeded } from "@/lib/db/misc";
 import type { ExtractedChapter } from "@/lib/types";
 
 let d: Db & { end(): Promise<void>; reset(): Promise<void> };
@@ -312,9 +312,14 @@ describe("misc", () => {
     expect((await getReportByToken(d, "t0k3n"))?.payload).toEqual({ a: 1 });
     expect(await getReportByToken(d, "nope")).toBeNull();
 
-    await recordLoginAttempt(d, false);
-    await recordLoginAttempt(d, false);
-    await recordLoginAttempt(d, true);
-    expect(await failedLoginsRecent(d)).toBe(2);
+    // Неудачи считаются по адресу: чужие попытки не закрывают вход владельцу.
+    for (let i = 0; i < 3; i += 1) await beginLoginAttempt(d, "6.6.6.6");
+    const mine = await beginLoginAttempt(d, "1.2.3.4");
+    expect(mine.failures).toBe(1);
+    // Одновременные попытки не проскакивают мимо счётчика.
+    const burst = await Promise.all(Array.from({ length: 8 }, () => beginLoginAttempt(d, "6.6.6.6")));
+    expect(Math.max(...burst.map((b) => b.failures))).toBe(11);
+    await loginSucceeded(d, mine.id, "1.2.3.4");
+    expect((await beginLoginAttempt(d, "1.2.3.4")).failures).toBe(1);
   });
 });

@@ -57,8 +57,14 @@ function sse(res: ServerResponse, event: string, data: unknown) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-export async function startMockAnthropic(): Promise<{ url: string; calls: MockCall[]; close(): Promise<void> }> {
+export interface MockControl {
+  /** Следующие n запросов перевода ответят ошибкой 400 (не повторяемой). */
+  failNext: number;
+}
+
+export async function startMockAnthropic(): Promise<{ url: string; calls: MockCall[]; control: MockControl; close(): Promise<void> }> {
   const calls: MockCall[] = [];
+  const control: MockControl = { failNext: 0 };
   const server: Server = createServer(async (req, res) => {
     const path = req.url ?? "";
     if (req.method === "GET" && path.startsWith("/v1/models/")) {
@@ -100,13 +106,23 @@ export async function startMockAnthropic(): Promise<{ url: string; calls: MockCa
       return;
     }
 
+    if (control.failNext > 0) {
+      control.failNext -= 1;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "mock: bad request" } }));
+      return;
+    }
     const paras = labelled(text);
+    // SLOW_ME — пауза между абзацами (чтобы успеть сменить исполнителя);
+    // FALLBACK_ME — ответ «пришёл» от запасной модели серверного повтора.
+    const slow = paras.some((p) => p.text.includes("SLOW_ME"));
+    const servedModel = paras.some((p) => p.text.includes("FALLBACK_ME")) ? "claude-sonnet-5" : model;
     const refuse = paras.some((p) => p.text.includes("REFUSE_ME")) && !model.includes("opus");
     const truncate = paras.some((p) => p.text.includes("TRUNCATE_ME")) && paras.length > 1;
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     sse(res, "message_start", {
       type: "message_start",
-      message: { id: "msg_1", type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 2000, output_tokens: 1 } },
+      message: { id: "msg_1", type: "message", role: "assistant", model: servedModel, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 2000, output_tokens: 1 } },
     });
     sse(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
     let stopReason = "end_turn";
@@ -118,6 +134,7 @@ export async function startMockAnthropic(): Promise<{ url: string; calls: MockCa
         break;
       }
       if (p.text.includes("SKIP_ME") && paras.length > 1) continue;
+      if (slow) await new Promise((r) => setTimeout(r, 150));
       const out = `⟦${p.idx}⟧ RU: ${p.text}\n\n`;
       // Метка нарочно режется между кусками потока.
       sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: out.slice(0, 2) } });
@@ -139,6 +156,7 @@ export async function startMockAnthropic(): Promise<{ url: string; calls: MockCa
   return {
     url: `http://127.0.0.1:${port}`,
     calls,
+    control,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }

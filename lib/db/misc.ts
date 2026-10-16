@@ -101,17 +101,25 @@ export async function getReportByToken(d: Db, token: string): Promise<{ id: stri
   };
 }
 
-/** Записать попытку входа. */
-export async function recordLoginAttempt(d: Db, ok: boolean): Promise<void> {
-  await d.query("insert into login_attempts (ok) values ($1)", [ok]);
+/**
+ * Попытка входа: сначала записать её как неудачную, потом посчитать — так
+ * одновременные запросы не проскочат мимо лимита. Возвращает id записи
+ * (её отмечают удачной после проверки пароля) и число неудач с этого адреса.
+ */
+export async function beginLoginAttempt(d: Db, ip: string, minutes = 15): Promise<{ id: string; failures: number }> {
+  const r = await d.query("insert into login_attempts (ip, ok) values ($1, false) returning id", [ip]);
+  const id = String(r.rows[0].id);
+  const c = await d.query(
+    "select count(*) as n from login_attempts where ip = $1 and not ok and created_at > now() - make_interval(mins => $2)",
+    [ip, minutes],
+  );
   // Старые записи не нужны: держим таблицу маленькой.
   await d.query("delete from login_attempts where created_at < now() - interval '1 day'");
+  return { id, failures: num(c.rows[0]?.n) };
 }
-/** Число неудачных попыток входа за последние minutes минут. */
-export async function failedLoginsRecent(d: Db, minutes = 15): Promise<number> {
-  const r = await d.query(
-    "select count(*) as n from login_attempts where not ok and created_at > now() - make_interval(mins => $1)",
-    [minutes],
-  );
-  return num(r.rows[0]?.n);
+
+/** Пароль подошёл: попытка удачная, и прежние неудачи с этого адреса забываются. */
+export async function loginSucceeded(d: Db, id: string, ip: string): Promise<void> {
+  await d.query("update login_attempts set ok = true where id = $1", [id]);
+  await d.query("delete from login_attempts where ip = $1 and not ok", [ip]);
 }

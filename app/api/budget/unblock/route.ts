@@ -1,19 +1,27 @@
-import { after, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { unblockJobs } from "@/lib/db/jobs";
-import { runJob } from "@/lib/server/worker";
+import { relaySecret } from "@/lib/server/worker";
 import { json, originOf, serverError } from "@/lib/server/http";
-
-export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   try {
-    const ids = await unblockJobs(await db());
+    const d = await db();
+    const ids = await unblockJobs(d);
     const origin = originOf(req);
-    // Каждую задачу — своим вызовом через эстафету: несколько глав подряд не уложатся в один заход.
-    after(async () => {
-      for (const id of ids) await runJob(id, { origin }).catch((e) => console.error("runJob", e));
-    });
+    const secret = await relaySecret(d);
+    // Каждую задачу — отдельным вызовом через эстафету: две главы в одном
+    // вызове не уложатся в 5 минут, и вторую оборвало бы посреди перевода.
+    await Promise.all(
+      ids.map((jobId) =>
+        fetch(`${origin}/api/jobs/run`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-relay-secret": secret },
+          body: JSON.stringify({ jobId }),
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => undefined),
+      ),
+    );
     return json({ unblocked: ids.length });
   } catch (e) {
     return serverError(e);

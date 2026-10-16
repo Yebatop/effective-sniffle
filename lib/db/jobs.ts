@@ -16,11 +16,28 @@ export const LEASE_SECONDS = 120;
 const LIVE_STATES = "('queued','running','blocked_budget','blocked_credit')";
 const TERMINAL: JobState[] = ["done", "failed"];
 
-export async function createOrGetJob(d: Db, input: { chapterId: string; model: ModelId; effort: Effort }, tries = 3): Promise<{ job: Job; created: boolean }> {
+export interface JobInput {
+  chapterId: string;
+  model: ModelId;
+  effort: Effort;
+  /** Продолжить перевод, на котором оборвалась прошлая задача: оплаченные части не переводятся заново. */
+  resume?: { translationId: string; nextChunk: number; chunksTotal: number | null; termsExtracted: boolean };
+}
+
+export async function createOrGetJob(d: Db, input: JobInput, tries = 3): Promise<{ job: Job; created: boolean }> {
   const r = await d.query(
-    `insert into jobs (chapter_id, kind, model, effort) values ($1, 'translate', $2, $3)
+    `insert into jobs (chapter_id, kind, model, effort, translation_id, next_chunk, chunks_total, terms_extracted)
+     values ($1, 'translate', $2, $3, $4, $5, $6, $7)
      on conflict do nothing returning *`,
-    [input.chapterId, input.model, input.effort],
+    [
+      input.chapterId,
+      input.model,
+      input.effort,
+      input.resume?.translationId ?? null,
+      input.resume?.nextChunk ?? 0,
+      input.resume?.chunksTotal ?? null,
+      input.resume?.termsExtracted ?? false,
+    ],
   );
   if (r.rows[0]) return { job: toJob(r.rows[0]), created: true };
   const live = await liveJobForChapter(d, input.chapterId);
@@ -51,6 +68,8 @@ export async function heartbeat(
 ): Promise<boolean> {
   const r = await d.query(
     `update jobs set lease_until = now() + make_interval(secs => $3), updated_at = now(),
+       retries = case when $4::int is not null and $4::int <> next_chunk then 0 else retries end,
+       chunk_tries = case when $4::int is not null and $4::int <> next_chunk then 0 else chunk_tries end,
        next_chunk = coalesce($4, next_chunk),
        chunks_total = coalesce($5, chunks_total),
        terms_extracted = coalesce($6, terms_extracted),
@@ -70,6 +89,58 @@ export async function setJobState(d: Db, id: string, state: JobState, error?: { 
      where id = $1`,
     [id, state, error?.code ?? null, error?.message ?? null, clearLease],
   );
+}
+
+/**
+ * То же, но только для своей попытки: исполнитель, которого уже сменили,
+ * не должен затереть состояние задачи нового исполнителя. false — сменили.
+ */
+export async function setJobStateIf(d: Db, id: string, attempt: number, state: JobState, error?: { code: ErrorCode; message: string } | null): Promise<boolean> {
+  const clearLease = TERMINAL.includes(state) || state.startsWith("blocked");
+  const r = await d.query(
+    `update jobs set state = $3, error_code = $4, error_message = $5,
+       lease_until = case when $6 then null else lease_until end, updated_at = now()
+     where id = $1 and attempt = $2 and state = 'running'
+     returning id`,
+    [id, attempt, state, error?.code ?? null, error?.message ?? null, clearLease],
+  );
+  return r.rows.length > 0;
+}
+
+/** +1 к заходам на текущую часть; вернёт новое значение (null — задачу сменили). */
+export async function bumpChunkTries(d: Db, id: string, attempt: number): Promise<number | null> {
+  const r = await d.query(
+    "update jobs set chunk_tries = chunk_tries + 1 where id = $1 and attempt = $2 and state = 'running' returning chunk_tries",
+    [id, attempt],
+  );
+  return r.rows[0] ? Number(r.rows[0].chunk_tries) : null;
+}
+
+/** +1 к повторам после временных ошибок; вернёт новое значение. */
+export async function bumpRetries(d: Db, id: string): Promise<number> {
+  const r = await d.query("update jobs set retries = retries + 1 where id = $1 returning retries", [id]);
+  return r.rows[0] ? Number(r.rows[0].retries) : 0;
+}
+
+/** Учесть резерв на задаче: delta > 0 — взяли, < 0 — вернули. */
+export async function trackReservation(d: Db, id: string, delta: number, month: string): Promise<void> {
+  await d.query(
+    "update jobs set reserved_usd = greatest(0, reserved_usd + $2), reserved_month = $3 where id = $1",
+    [id, delta, month],
+  );
+}
+
+/** Забрать с задачи резерв, оставшийся от убитого захода: вернёт, сколько было. */
+export async function takeOrphanReservation(d: Db, id: string): Promise<{ usd: number; month: string | null }> {
+  // Вызывается только захватившим задачу исполнителем — гонки за строку нет.
+  const r = await d.query(
+    `with old as (select reserved_usd, reserved_month from jobs where id = $1),
+          upd as (update jobs set reserved_usd = 0 where id = $1)
+     select * from old`,
+    [id],
+  );
+  const row = r.rows[0];
+  return { usd: row ? Number(row.reserved_usd) : 0, month: row?.reserved_month == null ? null : String(row.reserved_month) };
 }
 
 /** Отпустить аренду, оставив задачу продолжаемой (эстафета): state остаётся running, lease_until = now(). */

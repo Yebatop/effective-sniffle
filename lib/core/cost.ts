@@ -28,8 +28,26 @@ function n(v: number | null | undefined): number {
 }
 
 /** Фактическая цена вызова в долларах. batch — скидка 50%. */
-export function usageCostUsd(model: ModelId, usage: Usage, opts?: { batch?: boolean }): number {
-  const spec = MODELS[model];
+/**
+ * Цены моделей, которыми Anthropic может ответить вместо запрошенной при
+ * серверном повторе после отказа (fallbacks: "default"). Их нет в MODELS —
+ * выбирать их нельзя, но платить за их ответ приходится.
+ */
+const FALLBACK_PRICES: Record<string, Pick<ModelSpec, "inputPerMTok" | "outputPerMTok" | "cacheReadPerMTok">> = {
+  "claude-sonnet-5": { inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.2 },
+  "claude-opus-5": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5 },
+  "claude-opus-4-8": { inputPerMTok: 5, outputPerMTok: 25, cacheReadPerMTok: 0.5 },
+};
+
+/** Цены для модели из ответа: своя, запасная или — если неизвестна — запрошенной модели. */
+export function priceSpec(model: string, requested: ModelId): ModelSpec {
+  if (model in MODELS) return MODELS[model as ModelId];
+  const extra = FALLBACK_PRICES[model] ?? FALLBACK_PRICES[model.replace(/-\d{8}$/, "")];
+  return extra ? { ...MODELS[requested], ...extra, longPromptThreshold: null, longPromptMultiplier: 1 } : MODELS[requested];
+}
+
+export function usageCostUsd(model: ModelId | string, usage: Usage, opts?: { batch?: boolean; requested?: ModelId }): number {
+  const spec = priceSpec(String(model), opts?.requested ?? (model in MODELS ? (model as ModelId) : "claude-sonnet-5-5"));
   const input = n(usage.inputTokens);
   const output = n(usage.outputTokens);
   const write5m = n(usage.cacheWrite5mTokens);
@@ -76,8 +94,33 @@ export const THINKING_TOKENS_PER_CHUNK: Record<Effort, number> = { low: 0, mediu
 export const ALWAYS_THINKS_EXTRA_PER_CHUNK = 500;
 
 /** Оценка цены перевода текста из `words` английских слов (вход + выход + обдумывание). */
-export function estimateTranslationUsd(model: ModelId, words: number, opts?: { effort?: Effort; batch?: boolean }): number {
+/** Поиск имён до перевода: вся глава на входе, на выходе — только новые термины. */
+export const EXTRACT_FIXED_INPUT_TOKENS = 2500;
+/** В среднем по книге: в первых главах терминов много, потом единицы. */
+export const EXTRACT_OUTPUT_TOKENS = 600;
+
+export function estimateExtractionUsd(model: ModelId, words: number): number {
   if (!(words > 0)) return 0;
+  return usageCostUsd(model, {
+    inputTokens: words * EN_TOKENS_PER_WORD + EXTRACT_FIXED_INPUT_TOKENS,
+    outputTokens: EXTRACT_OUTPUT_TOKENS,
+    cacheWrite5mTokens: 0,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: 0,
+  });
+}
+
+/**
+ * Оценка цены главы. С extractModel — вместе с поиском имён: он идёт перед
+ * каждым переводом и на дешёвой модели перевода стоит дороже самого перевода.
+ */
+export function estimateTranslationUsd(model: ModelId, words: number, opts?: { effort?: Effort; batch?: boolean; extractModel?: ModelId }): number {
+  if (!(words > 0)) return 0;
+  const extraction = opts?.extractModel ? estimateExtractionUsd(opts.extractModel, words) : 0;
+  return extraction + estimateTranslationOnlyUsd(model, words, opts);
+}
+
+function estimateTranslationOnlyUsd(model: ModelId, words: number, opts?: { effort?: Effort; batch?: boolean }): number {
   const spec = MODELS[model];
   const effort = opts?.effort ?? "medium";
 

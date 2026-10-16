@@ -38,7 +38,16 @@ export default function ButtonScreen() {
   }, []);
 
   async function issue() {
-    if (installUrl && !window.confirm("Выпустить новый ключ? Кнопка, установленная раньше, перестанет работать — её нужно будет установить заново."))
+    // Ключ один на все устройства: новый ключ ломает кнопку, поставленную раньше
+    // (например, на телефоне, если сейчас ставим на компьютер).
+    let exists = Boolean(installUrl) || check === "ok";
+    if (!exists) exists = await api.buttonTokenStatus().then((r) => r.exists).catch(() => false);
+    if (
+      exists &&
+      !window.confirm(
+        "Кнопка уже установлена хотя бы в одном браузере. Новый ключ отключит её везде — её придётся поставить заново на каждом устройстве. Продолжить?",
+      )
+    )
       return;
     setBusy(true);
     setError(null);
