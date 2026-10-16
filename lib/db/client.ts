@@ -68,28 +68,99 @@ export async function db(): Promise<Db> {
   return p as unknown as Db;
 }
 
-/** Применить схему, если версия в базе ниже текущей. */
+/**
+ * Таблицы «Толмача» и колонка, по которой их можно узнать. Если в базе уже
+ * есть таблица с таким именем, но без этой колонки, — она чужая (например,
+ * осталась от прошлой версии «Толмача», где books была с ключом key).
+ */
+const OWN_TABLES: Record<string, string> = {
+  settings: "value",
+  books: "book_key",
+  chapters: "content_sha256",
+  chapter_paragraphs: "chapter_id",
+  translations: "chapter_id",
+  translation_paragraphs: "translation_id",
+  paragraph_overrides: "chapter_id",
+  terms: "en",
+  addresses: "from_term_id",
+  summaries: "chapter_id",
+  jobs: "chapter_id",
+  api_calls: "purpose",
+  budget: "month",
+  reading_position: "paragraph_idx",
+  reports: "token",
+  login_attempts: "ok",
+};
+
+/**
+ * Чужие таблицы с нашими именами — переименовать в legacy_*, вместе с их
+ * индексами (иначе имя «books_pkey» столкнулось бы с нашим). Данные не
+ * удаляются. Вызывается только для базы, где наша схема ещё не ставилась.
+ */
+async function moveAsideForeignTables(tx: Db): Promise<string[]> {
+  const moved: string[] = [];
+  for (const [table, column] of Object.entries(OWN_TABLES)) {
+    const exists = await tx.query(
+      "select 1 from information_schema.tables where table_schema = current_schema() and table_name = $1",
+      [table],
+    );
+    if (exists.rows.length === 0) continue;
+    const ours = await tx.query(
+      "select 1 from information_schema.columns where table_schema = current_schema() and table_name = $1 and column_name = $2",
+      [table, column],
+    );
+    if (ours.rows.length > 0) continue;
+    let target = `legacy_${table}`;
+    for (let n = 2; ; n += 1) {
+      const taken = await tx.query("select 1 from information_schema.tables where table_schema = current_schema() and table_name = $1", [target]);
+      if (taken.rows.length === 0) break;
+      target = `legacy_${table}_${n}`;
+    }
+    const indexes = await tx.query<{ indexname: string }>(
+      "select indexname from pg_indexes where schemaname = current_schema() and tablename = $1",
+      [table],
+    );
+    await tx.query(`alter table "${table}" rename to "${target}"`);
+    // Переименование индекса переименовывает и ограничение, которое на нём держится (primary key, unique).
+    for (const { indexname } of indexes.rows) {
+      await tx.query(`alter index "${indexname}" rename to "${`legacy_${indexname}`.slice(0, 63)}"`);
+    }
+    moved.push(`${table} → ${target}`);
+  }
+  return moved;
+}
+
+/**
+ * Применить схему, если версия в базе ниже текущей. Всё — в одной
+ * транзакции с блокировкой на время транзакции: так это безопасно и через
+ * пул соединений Neon (сеансовая блокировка там могла бы «уехать» на другое
+ * соединение), а при ошибке база остаётся как была.
+ */
 export async function migrate(target: Db | pg.Pool): Promise<void> {
   const q = target as Db;
-  await q.query(
-    "create table if not exists schema_meta (id int primary key default 1 check (id = 1), version int not null)",
-  );
-  const { rows } = await q.query<{ version: number }>("select version from schema_meta where id = 1");
-  const current = rows[0]?.version ?? 0;
-  if (current >= SCHEMA_VERSION) return;
-  // Две функции могут мигрировать одновременно: берём рекомендательную блокировку.
-  await q.query("select pg_advisory_lock(727272)");
+  // Быстрый путь без блокировки: схема уже стоит.
   try {
-    const again = await q.query<{ version: number }>("select version from schema_meta where id = 1");
-    if ((again.rows[0]?.version ?? 0) >= SCHEMA_VERSION) return;
-    await q.query(SCHEMA_SQL);
-    await q.query(
+    const { rows } = await q.query<{ version: number }>("select version from schema_meta where id = 1");
+    if ((rows[0]?.version ?? 0) >= SCHEMA_VERSION) return;
+  } catch {
+    // Таблицы ещё нет — ставим схему ниже.
+  }
+  await withTx(q, async (tx) => {
+    await tx.query("select pg_advisory_xact_lock(727272)");
+    await tx.query("create table if not exists schema_meta (id int primary key default 1 check (id = 1), version int not null)");
+    const { rows } = await tx.query<{ version: number }>("select version from schema_meta where id = 1");
+    const current = rows[0]?.version ?? 0;
+    if (current >= SCHEMA_VERSION) return;
+    if (current < 1) {
+      const moved = await moveAsideForeignTables(tx);
+      if (moved.length) console.warn("Толмач: чужие таблицы отодвинуты:", moved.join(", "));
+    }
+    await tx.query(SCHEMA_SQL);
+    await tx.query(
       "insert into schema_meta (id, version) values (1, $1) on conflict (id) do update set version = excluded.version",
       [SCHEMA_VERSION],
     );
-  } finally {
-    await q.query("select pg_advisory_unlock(727272)");
-  }
+  });
 }
 
 /**
