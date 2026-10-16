@@ -10,7 +10,8 @@ import type { Db } from "./client";
 import { toJob } from "./rows";
 import type { Effort, ErrorCode, Job, JobState, ModelId } from "../types";
 
-export const LEASE_SECONDS = 90;
+/** Аренда длиннее паузы до первых абзацев (модель может «думать» до минуты). */
+export const LEASE_SECONDS = 120;
 
 const LIVE_STATES = "('queued','running','blocked_budget','blocked_credit')";
 const TERMINAL: JobState[] = ["done", "failed"];
@@ -111,11 +112,11 @@ export async function staleJobs(d: Db): Promise<Job[]> {
   return r.rows.map(toJob);
 }
 
-/** Снять блокировку (после поднятия лимита или пополнения): blocked_* → queued. */
-export async function unblockJobs(d: Db): Promise<number> {
+/** Снять блокировку (после поднятия лимита или пополнения): blocked_* → queued. Возвращает id задач. */
+export async function unblockJobs(d: Db): Promise<string[]> {
   const r = await d.query(
     `update jobs set state = 'queued', error_code = null, error_message = null, updated_at = now()
      where state in ('blocked_budget','blocked_credit') returning id`,
   );
-  return r.rows.length;
+  return r.rows.map((row) => String(row.id));
 }

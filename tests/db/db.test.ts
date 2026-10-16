@@ -248,7 +248,7 @@ describe("jobs", () => {
     const { job } = await createOrGetJob(d, { chapterId: c.id, model: "claude-sonnet-5-5", effort: "medium" });
     await claimJob(d, job.id);
     await setJobState(d, job.id, "blocked_budget", { code: "budget_limit", message: "лимит" });
-    expect(await unblockJobs(d)).toBe(1);
+    expect(await unblockJobs(d)).toEqual([job.id]);
     expect((await liveJobForChapter(d, c.id))?.state).toBe("queued");
     expect(await claimJob(d, job.id)).not.toBeNull();
   });
