@@ -154,8 +154,13 @@ function topCut(paragraphs: string[]): number {
   let cut = 0;
   let wordsBefore = 0;
   for (let i = 0; i < limit; i++) {
-    if (isNavLine(paragraphs[i]) && wordsBefore <= Math.max(60, total * 0.15)) cut = i + 1;
-    wordsBefore += countWords(paragraphs[i]);
+    const own = countWords(paragraphs[i]);
+    // Меню сверху — только если до него почти ничего, а после него — бóльшая
+    // часть текста. Иначе «Next Chapter» в конце короткой вставки срезал бы всю главу.
+    const nearTop = wordsBefore <= Math.min(60, Math.max(8, total * 0.15));
+    const restIsChapter = total - wordsBefore - own >= total * 0.5;
+    if (isNavLine(paragraphs[i]) && nearTop && restIsChapter) cut = i + 1;
+    wordsBefore += own;
   }
   return cut;
 }

@@ -223,7 +223,7 @@ export default function ChapterPreview({
       </label>
       {choice === NEW && (
         <label className="field">
-          <span>Название новой книги</span>
+          <span>Название новой книги — можно оставить пустым и задать потом</span>
           <input
             className="input"
             value={newTitle}
@@ -262,7 +262,7 @@ export default function ChapterPreview({
           type="button"
           className="btn btn-primary btn-big btn-block"
           onClick={translate}
-          disabled={!!busy || empty || books === null || (choice === NEW && !newTitle.trim() && !chapter.url)}
+          disabled={!!busy || empty || books === null}
         >
           {busy === "translate" ? "Сохраняю и запускаю…" : price ? `Перевести · ${price}` : "Перевести"}
         </button>
