@@ -1,0 +1,41 @@
+{
+  "name": "tolmach",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Личный переводчик англоязычных веб-новелл на русский",
+  "scripts": {
+    "dev": "node scripts/build-userscript.mjs && next dev",
+    "build": "node scripts/build-userscript.mjs && next build",
+    "start": "next start",
+    "typecheck": "node scripts/build-userscript.mjs && tsc --noEmit",
+    "test": "node scripts/build-userscript.mjs && vitest run",
+    "migrate": "node --experimental-strip-types scripts/migrate.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.135.0",
+    "@mozilla/readability": "0.6.0",
+    "@vercel/functions": "3.10.1",
+    "idb-keyval": "6.3.0",
+    "jszip": "3.10.2",
+    "linkedom": "0.18.13",
+    "next": "16.4.2",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
+    "playwright-core": "1.64.1",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  }
+}
