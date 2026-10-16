@@ -39,6 +39,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
     "// @grant        GM_setValue",
     "// @grant        GM_getValue",
     "// @grant        GM_openInTab",
+    "// @grant        GM_registerMenuCommand",
     `// @connect      ${host}`,
     "// @connect      *",
     `// @updateURL    ${self}`,
