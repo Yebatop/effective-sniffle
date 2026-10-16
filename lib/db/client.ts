@@ -93,6 +93,28 @@ export async function migrate(target: Db | pg.Pool): Promise<void> {
 }
 
 /**
+ * Выполнить несколько запросов одной транзакцией. На пуле берёт отдельное
+ * соединение; если передан уже клиент транзакции (нет connect), выполняет
+ * как есть — вложенные вызовы не открывают новую транзакцию.
+ */
+export async function withTx<T>(d: Db, fn: (tx: Db) => Promise<T>): Promise<T> {
+  const maybePool = d as unknown as { connect?: () => Promise<pg.PoolClient> };
+  if (typeof maybePool.connect !== "function") return fn(d);
+  const client = await maybePool.connect();
+  try {
+    await client.query("begin");
+    const result = await fn(client as unknown as Db);
+    await client.query("commit");
+    return result;
+  } catch (e) {
+    await client.query("rollback").catch(() => undefined);
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Для тестов: отдельный пул к указанной базе, с чистой схемой.
  * Не трогает пул приложения.
  */
@@ -103,7 +125,9 @@ export async function testDb(url = process.env.TEST_DATABASE_URL ?? "postgres://
     await migrate(p);
   };
   await reset();
-  return Object.assign(p as unknown as Db, { end: () => p.end(), reset });
+  // end сохраняем заранее: Object.assign подменяет метод самого пула.
+  const end = p.end.bind(p);
+  return Object.assign(p as unknown as Db, { end: () => end(), reset });
 }
 
 /** Подменить базу приложения (тесты сервера и e2e). */

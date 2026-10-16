@@ -108,6 +108,9 @@ const CHAPTER_INSIDE = /(?:^|[-_.])(?:chapters?|chap|ch|episodes?|ep|glava|гл�
 /** Только маркер или том, без номера главы: /chapter/12, /vol-2/chapter-5. */
 const MARKER_SEGMENT = new RegExp(`^(?:${MARKER_WORDS}|read|(?:vol|volume|v|book|tom|том)[-_.]?\\d+)$`, "i");
 
+/** Сегмент, который сам по себе означает «дальше идёт адрес главы»: /chapter/…, /episodes/…. */
+const PURE_CHAPTER_MARKER = /^(?:chapters?|chap|ch|episodes?|ep|glava|глава)$/i;
+
 /** Последний номер главы из «chapter-N» внутри сегмента или null. */
 function chapterNumberInSegment(seg: string): number | null {
   let last: number | null = null;
@@ -181,6 +184,15 @@ function genericBookPath(segs: string[]): string[] {
   // так устроено большинство сайтов, и ошибиться тут дешевле, чем считать
   // книгой весь сайт. Маркеры и тома прямо перед ним — тоже часть адреса главы.
   let cut = segs.length - 1;
+  // Клоны Royal Road: /fiction/{id}/{slug}/chapter/{chapterId}/{slug-главы}.
+  // Всё начиная с голого «chapter» — адрес главы, иначе id главы попал бы
+  // в ключ, и каждая глава завела бы свою книгу со своим глоссарием.
+  for (let i = segs.length - 2; i >= 1; i -= 1) {
+    if (PURE_CHAPTER_MARKER.test(segs[i])) {
+      cut = i;
+      break;
+    }
+  }
   while (cut > 0 && MARKER_SEGMENT.test(segs[cut - 1])) cut -= 1;
   return segs.slice(0, cut);
 }

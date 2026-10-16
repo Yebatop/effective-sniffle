@@ -45,6 +45,14 @@ describe("normalizeUrl", () => {
 });
 
 describe("bookKeyFromUrl", () => {
+  it("Royal-Road-like generic sites keep chapter ids out of the book key", () => {
+    const a = "https://serialhall.example/fiction/4242/glass-river/chapter/9001/chapter-1";
+    const b = "https://serialhall.example/fiction/4242/glass-river/chapter/9002/chapter-2";
+    expect(bookKeyFromUrl(a)).toBe("serialhall.example/fiction/4242/glass-river");
+    expect(bookKeyFromUrl(b)).toBe(bookKeyFromUrl(a));
+    expect(bookKeyFromUrl("https://tales.example/novel/moon-gate/chapter/12")).toBe("tales.example/novel/moon-gate");
+    expect(chapterNumberFrom(null, b)).toBe(2);
+  });
   it("Royal Road: по id книги, разные книги — разные ключи", () => {
     expect(bookKeyFromUrl(RR)).toBe("royalroad.com/fiction/21220");
     expect(bookKeyFromUrl("https://royalroad.com/fiction/21220/some-slug")).toBe("royalroad.com/fiction/21220");
