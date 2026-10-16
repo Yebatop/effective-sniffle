@@ -32,6 +32,20 @@ const GROUP_MAX_CHARS = 90000;
 const LOOP_STALE_MS = 30 * 60 * 1000;
 /** Пульс работающего цикла: по нему другая вкладка понимает, что цикл жив. */
 const BEAT_MS = 2000;
+/**
+ * Сайты-приложения (Next.js и подобные) листают главы без перезагрузки:
+ * меняют адрес и перерисовывают страницу, а менеджер скриптов второй раз
+ * кнопку не запускает. Поэтому смотрим за адресом сами.
+ */
+const URL_POLL_MS = 1000;
+/** После загрузки или смены адреса глава может дорисовываться — следим столько. */
+const WATCH_MS = 15000;
+/** Проверки по таймеру в это окно — на случай, если страница меняется без новых узлов. */
+const WATCH_TICKS_MS = [1500, 4000, 8000, WATCH_MS];
+/** Не чаще раза в столько проверяем страницу, пока она перерисовывается. */
+const MUTATION_THROTTLE_MS = 700;
+/** Ушли с главы на не-главу (например, в оглавление) — убрать кнопку через столько. */
+const HIDE_AFTER_MS = 6000;
 
 function configured(): boolean {
   return APP_ORIGIN.indexOf("__TOLMACH_") !== 0 && IMPORT_TOKEN.indexOf("__TOLMACH_") !== 0 && /^https?:\/\//.test(APP_ORIGIN);
@@ -55,7 +69,7 @@ class UserError extends Error {
   }
 }
 
-function hasGm(name: "GM_xmlhttpRequest" | "GM_setValue" | "GM_getValue" | "GM_openInTab"): boolean {
+function hasGm(name: "GM_xmlhttpRequest" | "GM_setValue" | "GM_getValue" | "GM_openInTab" | "GM_registerMenuCommand"): boolean {
   switch (name) {
     case "GM_xmlhttpRequest":
       return typeof GM_xmlhttpRequest === "function";
@@ -65,6 +79,8 @@ function hasGm(name: "GM_xmlhttpRequest" | "GM_setValue" | "GM_getValue" | "GM_o
       return typeof GM_getValue === "function";
     case "GM_openInTab":
       return typeof GM_openInTab === "function";
+    case "GM_registerMenuCommand":
+      return typeof GM_registerMenuCommand === "function";
   }
   return false;
 }
@@ -425,6 +441,9 @@ interface Ui {
   setLabel(text: string | null): void;
   toast(text: string): void;
   remove(): void;
+  /** Кнопка всё ещё на странице: сайт при перерисовке мог её выкинуть. */
+  attached(): boolean;
+  reattach(): void;
 }
 
 const CSS = `
@@ -447,7 +466,8 @@ const CSS = `
 .toast.show { display: block; }
 `;
 
-function createUi(): Ui {
+/** onClose — читатель нажал «Закрыть». */
+function createUi(onClose: () => void): Ui {
   const host = document.createElement("tolmach-button");
   host.setAttribute("data-tolmach-ui", "1");
   // Свой интерфейс не должен попасть в текст главы.
@@ -485,6 +505,12 @@ function createUi(): Ui {
   root.appendChild(wrap);
 
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  const closeMenu = () => {
+    menu.className = "menu";
+  };
+  const mount = () => {
+    (document.body || document.documentElement).appendChild(host);
+  };
   const ui: Ui = {
     setLabel(text) {
       btn.textContent = text || "Т";
@@ -500,7 +526,14 @@ function createUi(): Ui {
       }, 6000);
     },
     remove() {
+      document.removeEventListener("click", closeMenu);
       if (host.parentNode) host.parentNode.removeChild(host);
+    },
+    attached() {
+      return host.isConnected;
+    },
+    reattach() {
+      if (!host.isConnected) mount();
     },
   };
   toastEl.addEventListener("click", () => {
@@ -532,7 +565,7 @@ function createUi(): Ui {
       item("Взять эту и следующие 5", () => void startLoop(ui, 5));
       item("Взять эту и следующие 10", () => void startLoop(ui, 10));
     }
-    item("Закрыть", () => ui.remove(), true);
+    item("Закрыть", onClose, true);
   };
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
@@ -544,35 +577,110 @@ function createUi(): Ui {
       menu.className = "menu open";
     }
   });
-  document.addEventListener("click", () => {
-    menu.className = "menu";
-  });
+  document.addEventListener("click", closeMenu);
 
-  (document.body || document.documentElement).appendChild(host);
+  mount();
   return ui;
 }
 
 function startButton(): void {
   let ui: Ui | null = null;
-  const show = () => {
-    if (!ui) ui = createUi();
+  /** Адрес, на котором читатель закрыл кнопку: там она сама больше не всплывает. */
+  let closedAt: string | null = null;
+  let lastUrl = urlKey(location.href);
+
+  const hide = () => {
+    if (ui) ui.remove();
+    ui = null;
+  };
+  const show = (): Ui => {
+    if (!ui) {
+      ui = createUi(() => {
+        closedAt = urlKey(location.href);
+        hide();
+      });
+    }
     return ui;
   };
+
+  // Глава могла дорисоваться скриптом сайта — проверяем страницу, пока она
+  // меняется (не чаще раза в MUTATION_THROTTLE_MS), и по таймеру.
+  let watchUntil = 0;
+  let observer: MutationObserver | null = null;
+  let throttle: ReturnType<typeof setTimeout> | null = null;
+  const stopWatching = () => {
+    if (observer) observer.disconnect();
+    observer = null;
+  };
+  const evaluate = () => {
+    if (ui || closedAt === urlKey(location.href)) {
+      stopWatching();
+      return;
+    }
+    if (looksLikeChapterPage()) {
+      show();
+      stopWatching();
+      return;
+    }
+    if (Date.now() >= watchUntil) stopWatching();
+  };
+  const watch = () => {
+    watchUntil = Date.now() + WATCH_MS;
+    evaluate();
+    if (ui) return;
+    for (const ms of WATCH_TICKS_MS) setTimeout(evaluate, ms);
+    if (!observer && typeof MutationObserver === "function" && document.body) {
+      observer = new MutationObserver(() => {
+        if (throttle) return;
+        throttle = setTimeout(() => {
+          throttle = null;
+          evaluate();
+        }, MUTATION_THROTTLE_MS);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+  };
+
+  // Переход без перезагрузки: новый адрес — новая проверка. Если ушли с главы
+  // на не-главу, кнопку убираем, но не посреди «и следующие N».
+  const onUrlMaybeChanged = () => {
+    if (ui && !ui.attached()) ui.reattach();
+    const now = urlKey(location.href);
+    if (now === lastUrl) return;
+    lastUrl = now;
+    if (closedAt !== now) closedAt = null;
+    if (ui) {
+      setTimeout(() => {
+        if (ui && !running && lastUrl === now && !looksLikeChapterPage()) {
+          hide();
+          watch();
+        }
+      }, HIDE_AFTER_MS);
+      return;
+    }
+    watch();
+  };
+  setInterval(onUrlMaybeChanged, URL_POLL_MS);
+  window.addEventListener("popstate", onUrlMaybeChanged);
+
+  // Запасной путь, если сайт не похож на главу: меню дополнения → «Показать кнопку».
+  if (hasGm("GM_registerMenuCommand")) {
+    try {
+      GM_registerMenuCommand("Показать кнопку «Т»", () => {
+        closedAt = null;
+        show();
+      });
+    } catch {
+      // без пункта меню — только автоматический показ
+    }
+  }
+
   const pending = loadLoop();
   if (pending && pending.host === location.host) {
     maybeResume(show());
     return;
   }
-  // Сайты-приложения дорисовывают главу скриптом — проверяем ещё пару раз.
-  const check = (left: number) => {
-    if (ui) return;
-    if (looksLikeChapterPage()) {
-      show();
-      return;
-    }
-    if (left > 0) setTimeout(() => check(left - 1), 2500);
-  };
-  check(2);
+  watch();
 }
 
 // ── Мост на страницах приложения ────────────────────────────────────────
