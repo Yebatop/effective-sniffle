@@ -144,9 +144,14 @@ settings(key, value)                               -- курс ₽/$, лимит
   вкладки читалки берёт следующую главу через `GM_xmlhttpRequest` с куками
   пользователя. [проверить, этап 1, на телефоне, Royal Road]: пропускает ли
   Cloudflare такие запросы подряд.
-- Firefox Android: Violentmonkey совместим. Edge Android: магазин дополнений с
-  Violentmonkey был с 2025 [проверить на телефоне владельца]. Chrome Android
-  дополнений не поддерживает.
+- Браузер владельца на телефоне — **Kiwi** (Chromium, ставит дополнения из
+  Chrome Web Store; не обновляется с января 2025). [проверить, этап 1]:
+  ставится ли и работает ли Violentmonkey/Tampermonkey в его версии Kiwi
+  (MV3-версиям менеджеров нужен `chrome.userScripts`, которого в старом
+  Chromium может не быть); работают ли установка PWA и `share_target`.
+  Скрипт пишется без зависимостей от новых API Chromium. Запасные: Edge
+  Android (в него перешёл код дополнений Kiwi), Firefox Android (Violentmonkey
+  совместим). Chrome Android дополнений не поддерживает.
 
 ## Задача перевода
 
