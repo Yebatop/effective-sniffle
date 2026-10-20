@@ -40,12 +40,26 @@ const BEAT_MS = 2000;
 const URL_POLL_MS = 1000;
 /** После загрузки или смены адреса глава может дорисовываться — следим столько. */
 const WATCH_MS = 15000;
-/** Проверки по таймеру в это окно — на случай, если страница меняется без новых узлов. */
-const WATCH_TICKS_MS = [1500, 4000, 8000, WATCH_MS];
+/**
+ * Проверки по таймеру в это окно — на случай, если страница меняется без
+ * новых узлов. Первая не сразу: сразу после смены адреса на экране ещё
+ * может быть прошлая страница.
+ */
+const WATCH_TICKS_MS = [600, 1500, 4000, 8000, WATCH_MS];
 /** Не чаще раза в столько проверяем страницу, пока она перерисовывается. */
 const MUTATION_THROTTLE_MS = 700;
-/** Ушли с главы на не-главу (например, в оглавление) — убрать кнопку через столько. */
-const HIDE_AFTER_MS = 6000;
+/**
+ * Столько после смены адреса страницу не оцениваем: по «Назад» сайт
+ * перерисовывается не сразу, и любая проверка (в том числе отложенная с
+ * прошлой страницы) увидела бы прошлую главу.
+ */
+const NAV_GRACE_MS = 500;
+/**
+ * Ушли с главы на не-главу (в оглавление) — кнопка уходит, когда окно
+ * наблюдения закончилось, а глава так и не появилась: медленно грузящаяся
+ * следующая глава не заставит кнопку мигать. Пока идёт отправка, ждём её конца.
+ */
+const SETTLE_RETRY_MS = 3000;
 
 function configured(): boolean {
   return APP_ORIGIN.indexOf("__TOLMACH_") !== 0 && IMPORT_TOKEN.indexOf("__TOLMACH_") !== 0 && /^https?:\/\//.test(APP_ORIGIN);
@@ -274,6 +288,16 @@ function saveLoop(s: LoopState | null): void {
 
 function urlKey(url: string): string {
   return url.replace(/#.*$/, "").replace(/\/+$/, "");
+}
+
+/**
+ * Адрес «страницы» для слежки за переходами: якорь вроде #comments не в
+ * счёт, а маршрут в якоре (#/book/ch-5, #!/…) — в счёт.
+ */
+function navKey(url: string): string {
+  const hash = url.indexOf("#");
+  if (hash >= 0 && /^#[/!]/.test(url.slice(hash))) return url.slice(0, hash).replace(/\/+$/, "") + url.slice(hash);
+  return urlKey(url);
 }
 
 let running = false;
@@ -564,8 +588,9 @@ function createUi(onClose: () => void): Ui {
       item("Взять эту и следующие 3", () => void startLoop(ui, 3));
       item("Взять эту и следующие 5", () => void startLoop(ui, 5));
       item("Взять эту и следующие 10", () => void startLoop(ui, 10));
+      // Посреди отправки не закрываем: прогресс и итог пишутся в эту кнопку.
+      item("Закрыть", onClose, true);
     }
-    item("Закрыть", onClose, true);
   };
   btn.addEventListener("click", (ev) => {
     ev.stopPropagation();
@@ -587,7 +612,10 @@ function startButton(): void {
   let ui: Ui | null = null;
   /** Адрес, на котором читатель закрыл кнопку: там она сама больше не всплывает. */
   let closedAt: string | null = null;
-  let lastUrl = urlKey(location.href);
+  /** Кнопку вызвали из меню дополнения — не убирать её самим до «Закрыть». */
+  let forced = false;
+  let lastKey = navKey(location.href);
+  let navAt = 0;
 
   const hide = () => {
     if (ui) ui.remove();
@@ -596,7 +624,8 @@ function startButton(): void {
   const show = (): Ui => {
     if (!ui) {
       ui = createUi(() => {
-        closedAt = urlKey(location.href);
+        closedAt = navKey(location.href);
+        forced = false;
         hide();
       });
     }
@@ -613,7 +642,8 @@ function startButton(): void {
     observer = null;
   };
   const evaluate = () => {
-    if (ui || closedAt === urlKey(location.href)) {
+    if (Date.now() - navAt < NAV_GRACE_MS) return;
+    if (ui || closedAt === navKey(location.href)) {
       stopWatching();
       return;
     }
@@ -624,9 +654,10 @@ function startButton(): void {
     }
     if (Date.now() >= watchUntil) stopWatching();
   };
-  const watch = () => {
+  /** now — проверить сразу (при загрузке); после перехода — только по таймеру и изменениям. */
+  const watch = (now: boolean) => {
     watchUntil = Date.now() + WATCH_MS;
-    evaluate();
+    if (now) evaluate();
     if (ui) return;
     for (const ms of WATCH_TICKS_MS) setTimeout(evaluate, ms);
     if (!observer && typeof MutationObserver === "function" && document.body) {
@@ -640,34 +671,37 @@ function startButton(): void {
       observer.observe(document.body, { childList: true, subtree: true });
     }
   };
-
-  // Переход без перезагрузки: новый адрес — новая проверка. Если ушли с главы
-  // на не-главу, кнопку убираем, но не посреди «и следующие N».
-  const onUrlMaybeChanged = () => {
-    if (ui && !ui.attached()) ui.reattach();
-    const now = urlKey(location.href);
-    if (now === lastUrl) return;
-    lastUrl = now;
-    if (closedAt !== now) closedAt = null;
-    if (ui) {
-      setTimeout(() => {
-        if (ui && !running && lastUrl === now && !looksLikeChapterPage()) {
-          hide();
-          watch();
-        }
-      }, HIDE_AFTER_MS);
+  // Окно наблюдения после перехода кончилось: не глава — кнопку убрать.
+  const settle = (key: string) => {
+    if (lastKey !== key || forced || !ui) return;
+    if (running) {
+      setTimeout(() => settle(key), SETTLE_RETRY_MS);
       return;
     }
-    watch();
+    if (!looksLikeChapterPage()) hide();
+  };
+
+  // Переход без перезагрузки: новый адрес — новое окно наблюдения.
+  const onUrlMaybeChanged = () => {
+    if (ui && !ui.attached()) ui.reattach();
+    const key = navKey(location.href);
+    if (key === lastKey) return;
+    lastKey = key;
+    navAt = Date.now();
+    if (closedAt !== key) closedAt = null;
+    watch(false);
+    setTimeout(() => settle(key), WATCH_MS);
   };
   setInterval(onUrlMaybeChanged, URL_POLL_MS);
   window.addEventListener("popstate", onUrlMaybeChanged);
+  window.addEventListener("hashchange", onUrlMaybeChanged);
 
   // Запасной путь, если сайт не похож на главу: меню дополнения → «Показать кнопку».
   if (hasGm("GM_registerMenuCommand")) {
     try {
       GM_registerMenuCommand("Показать кнопку «Т»", () => {
         closedAt = null;
+        forced = true;
         show();
       });
     } catch {
@@ -680,7 +714,7 @@ function startButton(): void {
     maybeResume(show());
     return;
   }
-  watch();
+  watch(true);
 }
 
 // ── Мост на страницах приложения ────────────────────────────────────────
