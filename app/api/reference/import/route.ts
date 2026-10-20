@@ -6,8 +6,7 @@
 import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { getBook, isUuid } from "@/lib/db/books";
-import { appendRefChapterPart, upsertRefChapter } from "@/lib/db/reference";
-import { resolveRefNumber } from "@/lib/core/refnumber";
+import { importRefChapter } from "@/lib/server/refimport";
 import { bearer, hasSession, importTokenValid } from "@/lib/server/access";
 import { fail, json, readJson, serverError } from "@/lib/server/http";
 import type { RefImportRequest, RefImportResponse } from "@/lib/types";
@@ -42,15 +41,21 @@ export async function POST(req: NextRequest) {
         : [];
       if (paragraphs.length === 0) continue;
       const title = str(raw.chapterTitle, 500) ?? "";
-      const url = str(raw.url, 2000);
       const expected = typeof raw.expectedNumber === "number" && Number.isInteger(raw.expectedNumber) && raw.expectedNumber > 0 ? raw.expectedNumber : null;
-      const resolved = resolveRefNumber(title, url, expected);
-      if (!resolved) return fail(400, "not_chapter", `Не понял номер главы «${title.slice(0, 80)}».`);
-      const { number, append } = resolved;
-      const r = append
-        ? await appendRefChapterPart(d, bookId, { number, title, paragraphs, url })
-        : await upsertRefChapter(d, bookId, { number, title, paragraphs, url });
-      items.push({ number, ...r });
+      const r = await importRefChapter(d, bookId, { title, url: str(raw.url, 2000), paragraphs, expectedNumber: expected, prevUrl: str(raw.prevUrl, 2000) });
+      if (r.kind === "no_number") return fail(400, "not_chapter", `Не понял номер главы «${title.slice(0, 80)}».`);
+      if (r.kind === "conflict") {
+        return json(
+          {
+            ok: false,
+            code: "conflict",
+            number: r.number,
+            message: `Глава ${r.number} этой книги уже взята с другого адреса и с другим текстом. Если выбрана не та книга — смените её в меню кнопки; если хотите собрать перевод заново — уберите готовый перевод на странице книги в Толмаче.`,
+          },
+          409,
+        );
+      }
+      items.push({ number: r.number, created: r.created, updated: r.updated });
     }
     if (items.length === 0) return fail(400, "not_chapter", "В присланном нет текста главы.");
     const out: RefImportResponse = { items };

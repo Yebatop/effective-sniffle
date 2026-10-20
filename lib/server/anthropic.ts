@@ -88,6 +88,9 @@ export function mapError(e: unknown): { code: ErrorCode; message: string; retrya
     if (/credit balance is too low/i.test(text)) {
       return { code: "credit_low", message: "На счёте Anthropic закончились деньги.", retryable: false };
     }
+    if (/prompt is too long|too many tokens|request too large/i.test(text)) {
+      return { code: "too_large", message: "Запрос слишком длинный для модели.", retryable: false };
+    }
     if (/specified API usage limits/i.test(text)) {
       return { code: "console_limit", message: "Сработал лимит трат в Anthropic Console.", retryable: false };
     }
@@ -102,6 +105,8 @@ export function mapError(e: unknown): { code: ErrorCode; message: string; retrya
   if (e instanceof Anthropic.APIError) {
     const status = e.status ?? 0;
     if (status === 529 || status >= 500) return { code: "overloaded", message: "Anthropic перегружен — попробую ещё раз.", retryable: true };
+    if (status === 402 || /billing/i.test(text)) return { code: "credit_low", message: "Anthropic не принял оплату — проверьте счёт и карту в Console.", retryable: false };
+    if (status === 413) return { code: "too_large", message: "Запрос слишком длинный для модели.", retryable: false };
     return { code: "unknown", message: text, retryable: false };
   }
   return { code: "unknown", message: text, retryable: false };
@@ -377,8 +382,11 @@ function hintLine(h: { ru: string; kind: string; gender: string | null; note: st
 export type JsonOutcome<T> =
   | { kind: "ok"; result: T; usage: Usage; model: string }
   | { kind: "refused"; usage: Usage; model: string }
-  /** truncated — ответ оборвался на max_tokens: повтор того же запроса не поможет. */
-  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string; truncated?: boolean };
+  /**
+   * truncated — ответ оборвался на max_tokens; malformed — ответ не по схеме.
+   * Оба зависят от текста запроса: повтор того же не поможет.
+   */
+  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string; truncated?: boolean; malformed?: boolean };
 
 const KIND_ENUM = z.enum(["name", "title", "technique", "place", "org", "item", "other"]);
 
@@ -500,7 +508,7 @@ async function jsonCall<T>(
     try {
       return { kind: "ok", result: format.parse(text) as T, usage, model: served };
     } catch {
-      return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: false, usage, model: served };
+      return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: false, usage, model: served, malformed: true };
     }
   } catch (e) {
     return { kind: "error", ...mapError(e), usage, model: served };

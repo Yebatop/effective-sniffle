@@ -14,7 +14,7 @@
  * подсказками для разбора новых глав.
  */
 
-import { db, type Db } from "../db/client";
+import { db, withTx, type Db } from "../db/client";
 import { getBook, getParagraphs } from "../db/books";
 import {
   addGlossarySpent,
@@ -34,6 +34,7 @@ import { getSettings } from "../db/misc";
 import {
   getRefChapter,
   linkRefTerms,
+  markScanAlone,
   markScanned,
   mergeRefTerms,
   refCounts,
@@ -45,7 +46,7 @@ import {
 } from "../db/reference";
 import { listTerms, mergeReferenceTerms } from "../db/terms";
 import { estimateGlossaryUsd, estimateTokens, usageCostUsd, worstCaseUsd } from "../core/cost";
-import { alignRefTerms, scanRefTerms, type JsonOutcome } from "./anthropic";
+import { ALIGN_MAX_TOKENS, SCAN_MAX_TOKENS, alignRefTerms, scanRefTerms, type JsonOutcome } from "./anthropic";
 import { relaySecret } from "./worker";
 import type { ErrorCode, GlossaryJob, ModelId, RefSummary, Usage } from "../types";
 
@@ -215,12 +216,15 @@ async function freezeAlign(ctx: Ctx): Promise<number[]> {
   return numbers;
 }
 
-/** Пачка: подряд, пока не больше SCAN_BATCH_WORDS слов (первая глава берётся всегда). */
-function pickBatch<T extends { words: number }>(list: T[]): T[] {
+/**
+ * Пачка: подряд, пока не больше SCAN_BATCH_WORDS слов (первая глава
+ * берётся всегда). Глава, помеченная «читать одну», идёт отдельной пачкой.
+ */
+function pickBatch<T extends { words: number; scanAlone: boolean }>(list: T[]): T[] {
   const out: T[] = [];
   let words = 0;
   for (const c of list) {
-    if (out.length > 0 && words + c.words > SCAN_BATCH_WORDS) break;
+    if (out.length > 0 && (c.scanAlone || out[0].scanAlone || words + c.words > SCAN_BATCH_WORDS)) break;
     out.push(c);
     words += c.words;
   }
@@ -230,42 +234,38 @@ function pickBatch<T extends { words: number }>(list: T[]): T[] {
 async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRefChapters>>): Promise<void> {
   const chapters = batch.map((c) => ({ number: c.number, title: c.title, text: c.paragraphs.join("\n\n").slice(0, SCAN_MAX_CHARS) }));
   const tokens = chapters.reduce((s, c) => s + estimateTokens(c.text), 0) + 2000;
-  const worst = usd6(worstCaseUsd(GLOSSARY_MODEL, tokens, 6000));
+  const worst = usd6(worstCaseUsd(GLOSSARY_MODEL, tokens, SCAN_MAX_TOKENS));
   await reserveOrBlock(ctx, worst);
   const { result: out, takenOver, timedOut } = await supervised(ctx, (signal) => scanRefTerms({ model: GLOSSARY_MODEL, chapters }, { signal }));
   await account(ctx, out, worst);
   if (takenOver) throw new TakenOver();
   if (timedOut) throw new OutOfTime();
-  // Пока шёл вызов, сбор могли остановить или готовый перевод убрать — тогда не писать.
-  await beat(ctx);
-  if (out.kind === "error") {
-    if (!deterministic(out)) throw new ApiFailure(out.code, out.message, out.retryable);
-    // Ответ оборвался, не разобрался или запрос отклонён: повтор того же не
-    // поможет. Пачку — пополам; одиночную главу — пропустить, иначе сбор
-    // встанет на ней навсегда.
-    if (batch.length > 1) {
-      const mid = Math.ceil(batch.length / 2);
-      await scanBatch(ctx, batch.slice(0, mid));
-      await scanBatch(ctx, batch.slice(mid));
-      return;
+  if (out.kind === "error" && !contentDependent(out)) throw new ApiFailure(out.code, out.message, out.retryable);
+  const done = batch.map((c) => ({ id: c.id, sha: c.sha }));
+  await writeIfStillOurs(ctx, async (tx) => {
+    if (out.kind === "error") {
+      // Ответ оборвался, не разобрался или запрос слишком длинный — повтор
+      // того же не поможет. Пачку — впредь по одной главе (каждая со своей
+      // отметкой: обрыв посреди не заставит платить за всё снова);
+      // одиночную главу — пропустить, иначе сбор встанет на ней навсегда.
+      if (batch.length > 1) return markScanAlone(tx, batch.map((c) => c.id));
+      console.warn("glossary: глава пропущена", batch[0].number, out.message);
+      return markScanned(tx, done);
     }
-    console.warn("glossary: глава пропущена", batch[0].number, out.message);
-    await markScanned(ctx.d, [batch[0].id]);
-    return;
-  }
-  if (out.kind === "ok") {
-    const numbers = batch.map((c) => c.number);
-    await mergeRefTerms(
-      ctx.d,
-      ctx.job.bookId,
-      out.result.terms.map((t) => {
-        const own = t.chapters.filter((n) => numbers.includes(n));
-        return { ru: t.ru, kind: t.kind, gender: t.gender, note: t.note, numbers: own.length ? own : numbers };
-      }),
-    );
-  }
-  // Отказ модели — главу не мучаем: имена из неё соберутся из соседних.
-  await markScanned(ctx.d, batch.map((c) => c.id));
+    if (out.kind === "ok") {
+      const numbers = batch.map((c) => c.number);
+      await mergeRefTerms(
+        tx,
+        ctx.job.bookId,
+        out.result.terms.map((t) => {
+          const own = t.chapters.filter((n) => numbers.includes(n));
+          return { ru: t.ru, kind: t.kind, gender: t.gender, note: t.note, numbers: own.length ? own : numbers };
+        }),
+      );
+    }
+    // Отказ модели — главу не мучаем: имена из неё соберутся из соседних.
+    await markScanned(tx, done);
+  });
 }
 
 async function alignPair(ctx: Ctx, pair: { number: number; chapterId: string; refId: string }): Promise<void> {
@@ -278,7 +278,7 @@ async function alignPair(ctx: Ctx, pair: { number: number; chapterId: string; re
     .slice(0, ALIGN_KNOWN_MAX)
     .map((t) => ({ en: t.en, ru: t.ru }));
   const tokens = estimateTokens(enText) + estimateTokens(ruText) + 4000;
-  const worst = usd6(worstCaseUsd(GLOSSARY_MODEL, tokens, 8000));
+  const worst = usd6(worstCaseUsd(GLOSSARY_MODEL, tokens, ALIGN_MAX_TOKENS));
   await reserveOrBlock(ctx, worst);
   const { result: out, takenOver, timedOut } = await supervised(ctx, (signal) =>
     alignRefTerms({ model: GLOSSARY_MODEL, number: pair.number, en: enText, ru: ruText, known }, { signal }),
@@ -286,24 +286,42 @@ async function alignPair(ctx: Ctx, pair: { number: number; chapterId: string; re
   await account(ctx, out, worst);
   if (takenOver) throw new TakenOver();
   if (timedOut) throw new OutOfTime();
-  await beat(ctx);
   if (out.kind === "error") {
-    // Как и в чтении: пару, которая не выходит, пропускаем, а не повторяем без конца.
-    if (deterministic(out)) return;
+    // Как и в чтении: пару, которая не выходит из-за текста, пропускаем.
+    if (contentDependent(out)) return;
     throw new ApiFailure(out.code, out.message, out.retryable);
   }
   if (out.kind !== "ok") return;
-  await mergeReferenceTerms(
-    ctx.d,
-    ctx.job.bookId,
-    pair.chapterId,
-    out.result.pairs.map((p) => ({ en: p.en, ru: p.ru, kind: p.kind, gender: p.gender, aliases: p.aliases, note: p.note })),
+  await writeIfStillOurs(ctx, (tx) =>
+    mergeReferenceTerms(
+      tx,
+      ctx.job.bookId,
+      pair.chapterId,
+      out.result.pairs.map((p) => ({ en: p.en, ru: p.ru, kind: p.kind, gender: p.gender, aliases: p.aliases, note: p.note })),
+    ).then(() => undefined),
   );
 }
 
-/** Ошибка, которую повтор того же запроса не исправит (не деньги и не ключ). */
-function deterministic(out: Extract<JsonOutcome<unknown>, { kind: "error" }>): boolean {
-  return out.code === "unknown" && !out.retryable;
+/**
+ * Ошибка из-за текста запроса: оборвался ответ, ответ не по схеме, запрос
+ * слишком длинный. Деньги, ключ, отсутствующая модель и прочее сюда не
+ * относятся — с ними задача останавливается и показывает причину.
+ */
+function contentDependent(out: Extract<JsonOutcome<unknown>, { kind: "error" }>): boolean {
+  return Boolean(out.truncated || out.malformed) || out.code === "too_large";
+}
+
+/**
+ * Записать результат одной транзакцией, держа строку задачи: пока идёт
+ * запись, «Остановить» и «Убрать готовый перевод» ждут, а если задачу уже
+ * остановили или сменили — не писать ничего.
+ */
+async function writeIfStillOurs(ctx: Ctx, fn: (tx: Db) => Promise<void>): Promise<void> {
+  await withTx(ctx.d, async (tx) => {
+    const r = await tx.query("select 1 from glossary_jobs where id = $1 and attempt = $2 and state = 'running' for update", [ctx.job.id, ctx.job.attempt]);
+    if (r.rows.length === 0) throw new TakenOver();
+    await fn(tx);
+  });
 }
 
 async function beat(ctx: Ctx, patch?: Parameters<typeof glossaryHeartbeat>[3]): Promise<void> {

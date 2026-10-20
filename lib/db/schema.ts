@@ -7,7 +7,7 @@
  * текст целиком к базе с версией ниже текущей.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 -- Схема «Толмача». Версия схемы — в schema_meta; migrate.ts применяет файл
@@ -240,6 +240,8 @@ create table if not exists ref_chapters (
   content_sha256 text not null,
   -- Имена из главы уже собраны в ref_terms.
   scanned boolean not null default false,
+  -- Вместе с соседями глава не читается (ответ обрывался) — только одна.
+  scan_alone boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (book_id, number)
@@ -297,4 +299,9 @@ create table if not exists glossary_jobs (
 );
 create unique index if not exists glossary_jobs_live on glossary_jobs(book_id)
   where state in ('queued','running','blocked_budget','blocked_credit');
+
+-- ── Версия 3: столбцы, которых не было в первой выкладке версии 2 ──────
+alter table ref_chapters add column if not exists urls text[] not null default '{}';
+alter table ref_chapters add column if not exists scan_alone boolean not null default false;
+alter table glossary_jobs add column if not exists align_numbers int[] not null default '{}';
 `;

@@ -58,3 +58,19 @@ test("версия 1 с данными → текущая: данные на м�
     updated: false,
   });
 });
+
+test("первая выкладка версии 2 (без новых столбцов) → текущая: столбцы добавляются", async () => {
+  await pool.query(`
+    alter table ref_chapters drop column urls;
+    alter table ref_chapters drop column scan_alone;
+    alter table glossary_jobs drop column align_numbers;
+    update schema_meta set version = 2;
+  `);
+  await migrate(pool);
+  const cols = (
+    await pool.query(
+      "select table_name || '.' || column_name as c from information_schema.columns where table_name in ('ref_chapters','glossary_jobs')",
+    )
+  ).rows.map((r) => r.c);
+  expect(cols).toEqual(expect.arrayContaining(["ref_chapters.urls", "ref_chapters.scan_alone", "glossary_jobs.align_numbers"]));
+});

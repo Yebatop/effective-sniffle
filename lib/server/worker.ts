@@ -84,8 +84,13 @@ const MAX_CHUNK_TRIES = 3;
 const REFUSED_PLACEHOLDER = "[Модель отказалась переводить этот абзац]";
 const SKIPPED_PLACEHOLDER = "[Абзац не переведён]";
 const HEARTBEAT_MS = 20_000;
-/** Подсказок из готового перевода в разборе главы — не больше (каждая ~15 токенов). */
-const HINTS_MAX = 150;
+/**
+ * Подсказок из готового перевода в разборе главы — не больше. Первые (самые
+ * свежие и частые) — с заметкой (~15 токенов), остальные — одним именем
+ * (~5 токенов): вернувшийся из ранних глав герой тоже должен узнаться.
+ */
+const HINTS_MAX = 400;
+const HINTS_WITH_NOTES = 80;
 
 /** Деньги в базе хранятся с точностью до 1e-6 $ — резерв и факт считаем так же, иначе остаются хвосты. */
 const usd6 = (x: number) => Math.ceil(x * 1e6) / 1e6;
@@ -341,7 +346,8 @@ async function extractStep(ctx: Ctx): Promise<void> {
   const model = ctx.settings.extractModel;
   const text = ctx.paragraphs.map((p) => p.text).join("\n\n");
   const hints = await refHints(ctx.d, ctx.book.id, HINTS_MAX);
-  const hintTokens = estimateTokens(hints.map((h) => `${h.ru} ${h.note ?? ""}`).join("\n")) + hints.length * 6;
+  const hintList = hints.map((h, i) => ({ ru: h.ru, kind: h.kind, gender: h.gender, note: i < HINTS_WITH_NOTES ? h.note : null }));
+  const hintTokens = estimateTokens(hintList.map((h) => `${h.ru} ${h.note ?? ""}`).join("\n")) + hintList.length * 6;
   const worst = usd6(worstCaseUsd(model, estimateTokens(text) + 3000 + hintTokens, 8000));
   await reserveOrBlock(ctx, worst);
   const isFirst = await isFirstChapterOfBook(ctx.d, ctx.chapter);
@@ -359,7 +365,7 @@ async function extractStep(ctx: Ctx): Promise<void> {
           })
           .filter((a): a is { fromEn: string; toEn: string; form: "ty" | "vy" } => a !== null),
         isFirstChapterOfBook: isFirst,
-        hints: hints.map((h) => ({ ru: h.ru, kind: h.kind, gender: h.gender, note: h.note })),
+        hints: hintList,
       },
       { signal },
     ),

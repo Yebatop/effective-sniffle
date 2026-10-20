@@ -94,13 +94,15 @@ function sse(res: ServerResponse, event: string, data: unknown) {
 }
 
 export interface MockControl {
-  /** Следующие n запросов перевода ответят ошибкой 400 (не повторяемой). */
+  /** Следующие n запросов перевода (и чтения готового перевода) ответят ошибкой. */
   failNext: number;
+  /** Код этой ошибки: 400 — запрос отклонён, 402 — оплата. */
+  failStatus: number;
 }
 
 export async function startMockAnthropic(): Promise<{ url: string; calls: MockCall[]; control: MockControl; close(): Promise<void> }> {
   const calls: MockCall[] = [];
-  const control: MockControl = { failNext: 0 };
+  const control: MockControl = { failNext: 0, failStatus: 400 };
   const server: Server = createServer(async (req, res) => {
     const path = req.url ?? "";
     if (req.method === "GET" && path.startsWith("/v1/models/")) {
@@ -122,8 +124,14 @@ export async function startMockAnthropic(): Promise<{ url: string; calls: MockCa
     if (!stream && systemText(body).includes("Выпиши из глав имена")) {
       if (control.failNext > 0) {
         control.failNext -= 1;
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "mock: bad request" } }));
+        const billing = control.failStatus === 402;
+        res.writeHead(control.failStatus, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            type: "error",
+            error: billing ? { type: "billing_error", message: "mock: payment required" } : { type: "invalid_request_error", message: "mock: bad request" },
+          }),
+        );
         return;
       }
       // ОБОРВИ в пачке — ответ обрывается на max_tokens (каждый раз).

@@ -140,7 +140,10 @@ try {
   );
   check("номера 1, 2, 3 в выбранную книгу", JSON.stringify(imports.map((i) => [i.bookId, i.number])) === JSON.stringify([["book-1", 1], ["book-1", 2], ["book-1", 3]]));
   check("в конце обход закончен", await waitFor(async () => !(await walkState()) || (await walkState()) === '""', 5000));
-  check("книга для сайта запомнена", Boolean(await page1.evaluate((h) => localStorage.getItem("gm:tolmach:refbook:" + h), new URL(BASE).host)));
+  check(
+    "книга для этой книги сайта запомнена",
+    await page1.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("gm:tolmach:refbook:") && localStorage.getItem(k) !== '""')),
+  );
 
   imports.length = 0;
   await page1.goto(`${BASE}/spa/ch-1`);
@@ -148,6 +151,8 @@ try {
   check("сайт-приложение: кнопка есть", await waitFor(hasButton, 8000));
   await tap();
   await page1.getByText("Готовый перевод: эту и следующие 10").click();
+  // Другая книга сайта (другой путь) — книгу Толмача спрашивают заново.
+  await page1.getByText("Salt Road").click();
   check(
     "«Далее» без адреса — обход идёт без перезагрузки",
     await waitFor(() => imports.length >= LAST, 45000),
@@ -162,10 +167,44 @@ try {
   await tap();
   await page1.getByText("Готовый перевод: эту и все следующие").click();
   await waitFor(() => imports.length >= 1, 8000);
+  // Вторая вкладка того же сайта посреди обхода: сама ничего не берёт и никуда не уходит.
+  const page2 = await ctx.newPage();
+  page2.on("pageerror", (e) => errors.push(String(e)));
+  await page2.goto(`${BASE}/ru/ch-2`);
+  await page2.waitForTimeout(6000);
+  const fromTab2 = imports.filter((i) => /ch-2$/.test(i.url)).length;
+  check("вторая вкладка обход не перехватывает", /\/ru\/ch-2$/.test(page2.url()) && fromTab2 <= 1, page2.url() + " / " + fromTab2);
+  await page2.locator("tolmach-button .btn").click();
+  const menu2 = await page2.locator("tolmach-button .menu").innerText();
+  check("…а её меню знает про идущий обход", /Продолжить обход «Salt Road»/.test(menu2), menu2.replace(/\s+/g, " "));
+  await page2.getByText(/Продолжить обход/).click();
+  await page2.waitForTimeout(500);
+  const toast2 = await page2.locator("tolmach-button .toast").innerText();
+  check("…и не даёт вести его в двух вкладках сразу", /идёт в другой вкладке/.test(toast2), toast2);
+  await page2.close();
   await tap();
   await page1.getByText("Остановить").click();
   await page1.waitForTimeout(6000);
-  check("«Остановить» — дальше не идёт", imports.length === 1 && /\/ru\/ch-1$/.test(page1.url()), page1.url());
+  const stoppedAt = page1.url();
+  const count = imports.length;
+  await page1.waitForTimeout(6000);
+  check("«Остановить» — дальше не идёт", imports.length === count && page1.url() === stoppedAt, stoppedAt + " / " + count);
+
+  // Обход оборвался (вкладку закрыли): открытая потом глава сама не продолжает его, а меню предлагает.
+  imports.length = 0;
+  await page1.evaluate(() => {
+    const raw = JSON.stringify({
+      v: 2, walkId: "other-tab", host: location.host, bookId: "book-1", bookTitle: "Salt Road", total: -1, done: 2, lastNumber: 2,
+      lastSig: null, skipped: 0, seen: [], navigatedAt: Date.now(), startedAt: Date.now(), updatedAt: Date.now(), beat: Date.now() - 60000,
+    });
+    localStorage.setItem("gm:tolmach:walk", JSON.stringify(raw));
+  });
+  await page1.goto(`${BASE}/ru/ch-3`);
+  await page1.waitForTimeout(7000);
+  check("брошенный обход сам не продолжается в новой вкладке", imports.length === 0 && /\/ru\/ch-3$/.test(page1.url()), String(imports.length));
+  await tap();
+  await page1.getByText(/Продолжить обход «Salt Road»/).click();
+  check("«Продолжить обход» из меню берёт эту главу", await waitFor(() => imports.length >= 1, 10000), JSON.stringify(imports.map((i) => i.number)));
 
   check("без ошибок на странице", errors.length === 0, errors.join("; "));
 } finally {

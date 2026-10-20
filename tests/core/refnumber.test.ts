@@ -20,6 +20,14 @@ describe("номер главы готового перевода", () => {
     expect(resolveRefNumber("Том 2 Глава 1", null, 41)).toEqual({ number: 41, append: false });
     expect(resolveRefNumber("Том 2 Глава 1.1", null, 41)).toEqual({ number: 41, append: false });
   });
+  it("том с нумерацией заново и главы из частей: части идут к своей главе, а не к главе первого тома", () => {
+    expect(resolveRefNumber("Том 2 Глава 1.1", null, 41, "Том 1 Глава 40")).toEqual({ number: 41, append: false });
+    expect(resolveRefNumber("Том 2 Глава 1.2", null, 42, "Том 2 Глава 1.1")).toEqual({ number: 41, append: true });
+    expect(resolveRefNumber("Глава 1 (продолжение)", null, 42, "Том 2 Глава 1.1")).toEqual({ number: 41, append: true });
+    expect(resolveRefNumber("Том 2 Глава 2.1", null, 42, "Том 2 Глава 1.1")).toEqual({ number: 42, append: false });
+    expect(resolveRefNumber("Том 2 Глава 2.2", null, 43, "Том 2 Глава 2.1")).toEqual({ number: 42, append: true });
+    expect(resolveRefNumber("Том 2 Глава 3", null, 43, "Том 2 Глава 2.1")).toEqual({ number: 43, append: false });
+  });
   it("без номера — ожидаемый, а если и его нет — не понять", () => {
     expect(resolveRefNumber("Эпилог", null, 120)).toEqual({ number: 120, append: false });
     expect(resolveRefNumber("Эпилог", null, null)).toBeNull();

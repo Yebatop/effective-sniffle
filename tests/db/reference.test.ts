@@ -59,7 +59,7 @@ describe("главы готового перевода", () => {
     expect(await upsertRefChapter(d, bookId, input)).toEqual({ created: true, updated: false });
     expect(await upsertRefChapter(d, bookId, input)).toEqual({ created: false, updated: false });
     const [row] = await unscannedRefChapters(d, bookId, 10);
-    await markScanned(d, [row.id]);
+    await markScanned(d, [{ id: row.id, sha: row.sha }]);
     expect((await refCounts(d, bookId)).unscanned).toBe(0);
     expect(await upsertRefChapter(d, bookId, { ...input, paragraphs: ["Караван дошёл до второго колодца."] })).toEqual({ created: false, updated: true });
     const c = await refCounts(d, bookId);

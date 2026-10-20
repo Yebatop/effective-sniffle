@@ -33,6 +33,7 @@ beforeEach(async () => {
   await d.reset();
   mock.calls.length = 0;
   mock.control.failNext = 0;
+  mock.control.failStatus = 400;
   await saveSettings(d, { translateModel: "claude-sonnet-5-5", monthlyLimitRub: 300, usdRub: 92 });
 });
 
@@ -158,16 +159,27 @@ describe("сбор глоссария по готовому переводу", (
     expect(terms.find((t) => t.en === "Mara")?.ru).toBe("Марра");
   });
 
-  test("запрос отклонён (400) — пачка делится пополам, все главы прочитаны, резерв вернулся", async () => {
+  test("запрос отклонён (400) — сбор останавливается с причиной, главы не помечаются прочитанными", async () => {
     const bookId = await setupBook();
     const { job } = await startGlossaryJob(bookId);
     mock.control.failNext = 1;
-    expect(await runToEnd(job.id)).toBe("done");
-    expect((await refCounts(d, bookId)).unscanned).toBe(0);
-    expect((await listRefTerms(d, bookId)).find((r) => r.ru === "Вальдо")?.lastNumber).toBe(2);
-    const scanCalls = mock.calls.filter((c) => JSON.stringify(c.body.system).includes("Выпиши из глав имена"));
-    expect(scanCalls.length).toBe(3);
+    expect(await runGlossaryJob(job.id, { relay: async () => undefined, sleep: async () => undefined })).toBe("failed");
+    expect((await getGlossaryJob(d, job.id))?.errorMessage).toMatch(/отклонил/);
+    expect((await refCounts(d, bookId)).unscanned).toBe(4);
+    // Запуск заново доходит до конца.
+    const again = await startGlossaryJob(bookId);
+    expect(await runToEnd(again.job.id)).toBe("done");
     expect((await budgetState(d, 300 / 92)).reservedUsd).toBe(0);
+  });
+
+  test("оплата не прошла (402) — сбор ждёт пополнения, ничего не пропущено", async () => {
+    const bookId = await setupBook();
+    const { job } = await startGlossaryJob(bookId);
+    mock.control.failNext = 1;
+    mock.control.failStatus = 402;
+    expect(await runGlossaryJob(job.id, { relay: async () => undefined, sleep: async () => undefined })).toBe("blocked");
+    expect((await getGlossaryJob(d, job.id))?.state).toBe("blocked_credit");
+    expect((await refCounts(d, bookId)).unscanned).toBe(4);
   });
 
   test("нечего собирать — понятная ошибка", async () => {

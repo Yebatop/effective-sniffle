@@ -166,12 +166,13 @@ export async function mergeReferenceTerms(
       // форма не годится для основного написания термина.
       const byMainName = low(known.en) === low(en);
       const newRu = byMainName && known.source === "auto" && low(known.ru) !== low(ru) ? ru : null;
-      const fillGender = known.kind === "name" && !known.gender && gender ? gender : null;
+      // «unknown» — тоже пусто: готовый перевод род знает лучше.
+      const fillGender = known.kind === "name" && (!known.gender || known.gender === "unknown") && gender && gender !== "unknown" ? gender : null;
       const fillNote = !known.note && note ? note : null;
       if (!newRu && newAliases.length === 0 && !fillGender && !fillNote) continue;
       const r = await d.query(
         `update terms set ru = coalesce($2, ru), source = case when $2::text is not null then 'reference' else source end,
-           aliases = aliases || $3::text[], gender = coalesce(gender, $4), note = coalesce(note, $5), updated_at = now()
+           aliases = aliases || $3::text[], gender = coalesce($4, gender), note = coalesce(note, $5), updated_at = now()
          where id = $1 and status <> 'checked' returning *`,
         [known.id, newRu, newAliases, fillGender, fillNote],
       );

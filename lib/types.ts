@@ -346,6 +346,8 @@ export interface RefChapterInput {
   paragraphs: string[];
   /** Номер, который ждёт кнопка (прошлый + 1), — если в заголовке и адресе номера нет. */
   expectedNumber?: number | null;
+  /** Ссылка «назад» со страницы: если она уже записана, номер — следующий за ней. */
+  prevUrl?: string | null;
 }
 
 /** POST /api/reference/import */
@@ -355,6 +357,14 @@ export interface RefImportRequest {
 }
 export interface RefImportResponse {
   items: Array<{ number: number; created: boolean; updated: boolean }>;
+}
+
+/** 409 от /api/reference/import: под номером уже глава с другого адреса. */
+export interface RefImportConflict {
+  ok: false;
+  code: "conflict";
+  number: number;
+  message: string;
 }
 
 /** GET /api/reference/books — для выбора книги в кнопке. */

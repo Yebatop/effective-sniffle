@@ -57,8 +57,11 @@ export default function GlossaryScreen({ bookId }: { bookId: string }) {
     setData((d) =>
       d
         ? {
+            ...d,
             terms: d.terms.filter((x) => x.id !== id),
             addresses: d.addresses.filter((a) => a.fromTermId !== id && a.toTermId !== id),
+            // Имя готового перевода, связанное с удалённым термином, снова подсказка.
+            refTerms: (d.refTerms ?? []).map((r) => (r.termId === id ? { ...r, termId: null } : r)),
           }
         : d,
     );

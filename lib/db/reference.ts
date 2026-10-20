@@ -27,18 +27,52 @@ export interface RefChapterRow {
   title: string;
   paragraphs: string[];
   words: number;
+  /** Хеш текста на момент чтения: глава, дописанная за это время, не помечается прочитанной. */
+  sha: string;
+  /** Читать только одну, без соседей. */
+  scanAlone: boolean;
+}
+
+export interface RefWriteResult {
+  created: boolean;
+  updated: boolean;
+  /** Под этим номером уже глава с другого адреса и с другим текстом — не затираем. */
+  conflict?: boolean;
+}
+
+function toRefChapterRow(row: Record<string, unknown>): RefChapterRow {
+  return {
+    id: String(row.id),
+    number: Number(row.number),
+    title: String(row.title ?? ""),
+    paragraphs: Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : [],
+    words: Number(row.words ?? 0),
+    sha: String(row.content_sha256 ?? ""),
+    scanAlone: Boolean(row.scan_alone),
+  };
 }
 
 /**
  * Записать главу готового перевода. Та же глава с тем же текстом — ничего
- * не меняется; с другим текстом — заменяется и будет прочитана заново.
+ * не меняется; с того же адреса, но с другим текстом — заменяется и будет
+ * прочитана заново. Под номером уже глава с другого адреса и с другим
+ * текстом — не затираем (conflict): скорее всего, выбрана не та книга или
+ * сбилась нумерация.
  */
 export async function upsertRefChapter(
   d: Db,
   bookId: string,
   input: { number: number; title: string; paragraphs: string[]; url: string | null },
-): Promise<{ created: boolean; updated: boolean }> {
+): Promise<RefWriteResult> {
   const sha = contentHash(input.paragraphs);
+  const prev = await d.query("select urls, content_sha256 from ref_chapters where book_id = $1 and number = $2", [bookId, input.number]);
+  const old = prev.rows[0];
+  if (old) {
+    const urls = Array.isArray(old.urls) ? (old.urls as unknown[]).map(String) : [];
+    if (urls.length > 0 && input.url && !urls.includes(input.url) && String(old.content_sha256) !== sha) {
+      return { created: false, updated: false, conflict: true };
+    }
+  }
   const r = await d.query(
     `insert into ref_chapters (book_id, number, title, paragraphs, words, url, urls, content_sha256)
      values ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -63,7 +97,7 @@ export async function appendRefChapterPart(
   d: Db,
   bookId: string,
   input: { number: number; title: string; paragraphs: string[]; url: string | null },
-): Promise<{ created: boolean; updated: boolean }> {
+): Promise<RefWriteResult> {
   const existing = await d.query("select paragraphs, urls from ref_chapters where book_id = $1 and number = $2 for update", [bookId, input.number]);
   const row = existing.rows[0];
   if (!row) return upsertRefChapter(d, bookId, input);
@@ -99,21 +133,43 @@ export async function refCounts(d: Db, bookId: string): Promise<{ count: number;
 /** Следующие непрочитанные главы по порядку номеров. */
 export async function unscannedRefChapters(d: Db, bookId: string, limit: number): Promise<RefChapterRow[]> {
   const r = await d.query(
-    "select id, number, title, paragraphs, words from ref_chapters where book_id = $1 and not scanned order by number limit $2",
+    `select id, number, title, paragraphs, words, content_sha256, scan_alone
+     from ref_chapters where book_id = $1 and not scanned order by number limit $2`,
     [bookId, limit],
   );
-  return r.rows.map((row) => ({
-    id: String(row.id),
-    number: Number(row.number),
-    title: String(row.title ?? ""),
-    paragraphs: Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : [],
-    words: Number(row.words ?? 0),
-  }));
+  return r.rows.map(toRefChapterRow);
 }
 
-export async function markScanned(d: Db, ids: string[]): Promise<void> {
+/** Пометить прочитанными — только если текст не поменялся с начала чтения (кнопка могла дописать часть). */
+export async function markScanned(d: Db, items: Array<{ id: string; sha: string }>): Promise<void> {
+  if (items.length === 0) return;
+  await d.query(
+    `update ref_chapters rc set scanned = true, updated_at = now()
+     from unnest($1::uuid[], $2::text[]) as x(id, sha)
+     where rc.id = x.id and rc.content_sha256 = x.sha`,
+    [items.map((i) => i.id), items.map((i) => i.sha)],
+  );
+}
+
+/** Эти главы впредь читать по одной. */
+export async function markScanAlone(d: Db, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  await d.query("update ref_chapters set scanned = true, updated_at = now() where id = any($1::uuid[])", [ids]);
+  await d.query("update ref_chapters set scan_alone = true where id = any($1::uuid[])", [ids]);
+}
+
+/** Номер главы готового перевода, взятой с этого адреса (или null). */
+export async function refNumberByUrl(d: Db, bookId: string, url: string): Promise<number | null> {
+  const r = await d.query(
+    "select number from ref_chapters where book_id = $1 and (url = $2 or $2 = any(urls)) order by number desc limit 1",
+    [bookId, url],
+  );
+  return r.rows[0] ? Number(r.rows[0].number) : null;
+}
+
+/** Заголовок главы готового перевода с этим номером (или null). */
+export async function refTitle(d: Db, bookId: string, number: number): Promise<string | null> {
+  const r = await d.query("select title from ref_chapters where book_id = $1 and number = $2", [bookId, number]);
+  return r.rows[0] ? String(r.rows[0].title ?? "") : null;
 }
 
 /**
@@ -156,16 +212,8 @@ export async function refPairCount(d: Db, bookId: string): Promise<number> {
 }
 
 export async function getRefChapter(d: Db, id: string): Promise<RefChapterRow | null> {
-  const r = await d.query("select id, number, title, paragraphs, words from ref_chapters where id = $1", [id]);
-  const row = r.rows[0];
-  if (!row) return null;
-  return {
-    id: String(row.id),
-    number: Number(row.number),
-    title: String(row.title ?? ""),
-    paragraphs: Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : [],
-    words: Number(row.words ?? 0),
-  };
+  const r = await d.query("select id, number, title, paragraphs, words, content_sha256, scan_alone from ref_chapters where id = $1", [id]);
+  return r.rows[0] ? toRefChapterRow(r.rows[0]) : null;
 }
 
 /** Последние абзацы главы готового перевода с этим номером — образец стиля перед своей главой. */
@@ -222,13 +270,25 @@ export async function mergeRefTerms(d: Db, bookId: string, proposals: RefTermPro
 
 /**
  * Связать имена готового перевода с терминами глоссария: совпадает русское
- * написание (без учёта регистра). Связанное перестаёт быть подсказкой.
+ * написание (без учёта регистра) и род сущности (персонаж с персонажем или
+ * титулом, место с местом…), и такое написание в глоссарии одно — иначе
+ * «Тень»-прозвище съела бы подсказку «Тень»-приёма. Связанное перестаёт
+ * быть подсказкой.
  */
 export async function linkRefTerms(d: Db, bookId: string): Promise<number> {
   const r = await d.query(
-    `update ref_terms rt set term_id = t.id, updated_at = now()
-     from terms t
-     where rt.book_id = $1 and t.book_id = $1 and rt.term_id is null and lower(rt.ru) = lower(t.ru)`,
+    `with grouped as (
+       select id, lower(ru) as ru_l,
+              case when kind in ('name','title') then 'person' else kind end as grp
+       from terms where book_id = $1
+     ),
+     single as (
+       select ru_l, grp, min(id::text)::uuid as id from grouped group by ru_l, grp having count(*) = 1
+     )
+     update ref_terms rt set term_id = s.id, updated_at = now()
+     from single s
+     where rt.book_id = $1 and rt.term_id is null and lower(rt.ru) = s.ru_l
+       and (case when rt.kind in ('name','title') then 'person' else rt.kind end) = s.grp`,
     [bookId],
   );
   return r.rowCount ?? 0;

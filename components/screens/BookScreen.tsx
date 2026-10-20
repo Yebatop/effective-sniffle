@@ -330,7 +330,8 @@ function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number |
     );
   }
 
-  const canStart = !live && (s.unscanned > 0 || s.pairs > 0);
+  const blocked = job?.state === "blocked_budget" || job?.state === "blocked_credit";
+  const canStart = !live && !blocked && (s.unscanned > 0 || s.pairs > 0);
   const doneBefore = job?.state === "done" && s.unscanned === 0;
 
   return (
@@ -365,7 +366,12 @@ function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number |
             {price ? ` — ${price}` : ""}
           </button>
         )}
-        {live && (
+        {blocked && (
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => act(() => api.unblockBudget())}>
+            Продолжить
+          </button>
+        )}
+        {(live || blocked) && (
           <button type="button" className="btn" disabled={busy} onClick={() => act(() => api.stopGlossary(bookId))}>
             Остановить
           </button>
@@ -402,10 +408,13 @@ function GlossaryJobLine({ job, hints, matched }: { job: NonNullable<RefSummary[
       </p>
     );
   }
-  if (job.state === "blocked_budget") return <p className="p notice-warn">Не хватило месячного лимита. Поднимите его в Настройках — сбор продолжится.</p>;
-  if (job.state === "blocked_credit") return <p className="p notice-warn">На счёте Anthropic кончились деньги. Пополните его — сбор продолжится.</p>;
-  if (job.state === "failed") return <p className="p notice-warn">Сбор оборвался: {job.errorMessage || "неизвестная ошибка"}. Можно запустить ещё раз — сделанное не повторится.</p>;
-  if (job.state === "stopped") return <p className="p muted">Сбор остановлен. Можно продолжить — сделанное не повторится.</p>;
+  if (job.state === "blocked_budget")
+    return <p className="p notice-warn">Не хватило месячного лимита. Поднимите его в Настройках и нажмите «Продолжить».</p>;
+  if (job.state === "blocked_credit")
+    return <p className="p notice-warn">На счёте Anthropic кончились деньги. Пополните его и нажмите «Продолжить».</p>;
+  if (job.state === "failed")
+    return <p className="p notice-warn">Сбор оборвался: {job.errorMessage || "неизвестная ошибка"}. Можно запустить ещё раз — прочитанные главы заново не читаются.</p>;
+  if (job.state === "stopped") return <p className="p muted">Сбор остановлен. Можно продолжить — прочитанные главы заново не читаются.</p>;
   return (
     <p className="p" role="status">
       Готово ✓ Имён из готового перевода: <strong className="nums">{num(hints + matched)}</strong>, из них сопоставлено с
