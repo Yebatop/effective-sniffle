@@ -9,6 +9,7 @@ import { SESSION_COOKIE, appPassword, verifySession } from "./lib/server/auth";
 // Открыты без пароля: вход, манифест и служебный файл (иначе телефон не
 // установит приложение), кнопка для сайтов (у неё свой ключ), эстафета
 // исполнителя (свой секрет), крон, отчёт по секретной ссылке, версия.
+// Приём готового перевода от кнопки — тоже по ключу кнопки.
 const PUBLIC: RegExp[] = [
   /^\/login\/?$/,
   /^\/api\/login$/,
@@ -19,7 +20,9 @@ const PUBLIC: RegExp[] = [
   /^\/(favicon\.ico|icon[^/]*|apple-icon[^/]*)$/,
   /^\/u\/[^/]+\/tolmach\.user\.js$/,
   /^\/api\/import$/,
+  /^\/api\/reference\/(import|books)$/,
   /^\/api\/jobs\/run$/,
+  /^\/api\/glossary\/run$/,
   /^\/api\/cron$/,
 ];
 const PUBLIC_GET: RegExp[] = [/^\/api\/report\/[^/]+$/];

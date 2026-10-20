@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { api, errorText, getSettingsCached, type BookDetail, type BookPatch } from "@/lib/client/api";
 import { num, plural, rub } from "@/lib/client/format";
-import type { Book, Gender, Register } from "@/lib/types";
+import type { Book, Gender, RefSummary, Register } from "@/lib/types";
 import Cover from "../Cover";
 import { BackLink, ErrorNote, Loading } from "../bits";
 
@@ -133,6 +133,8 @@ export default function BookScreen({ bookId }: { bookId: string }) {
           </div>
         </Link>
 
+        <ReadyTranslation bookId={book.id} usdRub={usdRub} />
+
         <BookSettings book={book} onSaved={(b) => setData((d) => (d ? { ...d, book: { ...d.book, ...b } } : d))} />
       </div>
     </main>
@@ -260,6 +262,156 @@ function BookSettings({ book, onSaved }: { book: Book; onSaved: (b: Book) => voi
         {state === "saved" && !dirty && <span className="small" style={{ color: "var(--ok)" }}>Сохранено ✓</span>}
       </div>
     </form>
+  );
+}
+
+const LIVE = ["queued", "running"];
+
+/**
+ * Готовый перевод: главы чужого русского перевода, собранные кнопкой «Т»,
+ * и сбор глоссария по ним (с ценой до запуска и ходом работы).
+ */
+function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number | null }) {
+  const [s, setS] = useState<RefSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .reference(bookId)
+      .then((r) => alive && (setS(r), setError(null)))
+      .catch((e) => alive && setError(errorText(e)));
+    return () => {
+      alive = false;
+    };
+  }, [bookId, tick]);
+
+  // Пока идёт сбор — обновляем ход каждые 4 секунды.
+  const live = Boolean(s?.job && LIVE.includes(s.job.state));
+  useEffect(() => {
+    if (!live) return;
+    const t = setTimeout(() => setTick((n) => n + 1), 4000);
+    return () => clearTimeout(t);
+  }, [live, tick]);
+
+  async function act(fn: () => Promise<unknown>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      setTick((n) => n + 1);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!s) return error ? <ErrorNote text={error} onRetry={() => setTick((n) => n + 1)} /> : null;
+
+  const price = usdRub !== null ? rub(s.estimateUsd, usdRub) : null;
+  const job = s.job;
+
+  if (s.count === 0) {
+    return (
+      <section className="card stack-sm" aria-label="Готовый перевод">
+        <h2 className="display">Готовый перевод</h2>
+        <p className="p">
+          Если начало книги вы читали в чужом переводе, Толмач возьмёт оттуда имена и продолжит в том же духе — не
+          переводя эти главы заново.
+        </p>
+        <p className="hint">
+          На сайте с переводом откройте первую главу → «Т» → «Готовый перевод: эту и все следующие» → выберите эту
+          книгу. Кнопка сама пролистает главы; на телефоне держите вкладку открытой.
+        </p>
+      </section>
+    );
+  }
+
+  const canStart = !live && (s.unscanned > 0 || s.pairs > 0);
+  const doneBefore = job?.state === "done" && s.unscanned === 0;
+
+  return (
+    <section className="card stack" aria-label="Готовый перевод">
+      <div className="stack-sm">
+        <h2 className="display">Готовый перевод</h2>
+        <p className="p">
+          Глав: <strong className="nums">{num(s.count)}</strong>
+          {s.minNumber !== null && s.maxNumber !== null && (
+            <span className="muted">
+              {" "}
+              (главы {num(s.minNumber)}–{num(s.maxNumber)})
+            </span>
+          )}
+          . Совпадают с английскими по номеру: <strong className="nums">{num(s.pairs)}</strong>.
+        </p>
+        {s.pairs === 0 && (
+          <p className="hint">
+            Для точной сверки добавьте несколько английских глав с теми же номерами — например, последние 5–10 —
+            кнопкой «Т» на сайте с оригиналом. Без них Толмач возьмёт имена по-русски и сопоставит их при переводе.
+          </p>
+        )}
+      </div>
+
+      {job && <GlossaryJobLine job={job} hints={s.hints} matched={s.matched} />}
+
+      {error && <ErrorNote text={error} />}
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        {canStart && (
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={() => act(() => api.startGlossary(bookId))}>
+            {doneBefore ? "Сверить с английским ещё раз" : "Собрать глоссарий"}
+            {price ? ` — ${price}` : ""}
+          </button>
+        )}
+        {live && (
+          <button type="button" className="btn" disabled={busy} onClick={() => act(() => api.stopGlossary(bookId))}>
+            Остановить
+          </button>
+        )}
+        {(s.hints > 0 || s.matched > 0) && (
+          <Link className="btn btn-quiet" href={`/book/${encodeURIComponent(bookId)}/glossary`}>
+            Открыть глоссарий
+          </Link>
+        )}
+        <button
+          type="button"
+          className="btn btn-quiet"
+          disabled={busy || live}
+          onClick={() => {
+            if (window.confirm("Убрать главы готового перевода из Толмача? Глоссарий останется.")) void act(() => api.deleteReference(bookId));
+          }}
+        >
+          Убрать готовый перевод
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function GlossaryJobLine({ job, hints, matched }: { job: NonNullable<RefSummary["job"]>; hints: number; matched: number }) {
+  if (job.state === "queued" || job.state === "running") {
+    const text =
+      job.stage === "scan"
+        ? `Читаю готовый перевод: ${num(job.scanDone)} из ${num(job.scanTotal)} ${plural(job.scanTotal, "главы", "глав", "глав")}`
+        : `Сверяю с английским: ${num(job.alignDone)} из ${num(job.alignTotal)}`;
+    return (
+      <p className="p" role="status">
+        <span className="spinner" aria-hidden="true" /> {text}… Можно закрыть страницу — сбор идёт сам.
+      </p>
+    );
+  }
+  if (job.state === "blocked_budget") return <p className="p notice-warn">Не хватило месячного лимита. Поднимите его в Настройках — сбор продолжится.</p>;
+  if (job.state === "blocked_credit") return <p className="p notice-warn">На счёте Anthropic кончились деньги. Пополните его — сбор продолжится.</p>;
+  if (job.state === "failed") return <p className="p notice-warn">Сбор оборвался: {job.errorMessage || "неизвестная ошибка"}. Можно запустить ещё раз — сделанное не повторится.</p>;
+  if (job.state === "stopped") return <p className="p muted">Сбор остановлен. Можно продолжить — сделанное не повторится.</p>;
+  return (
+    <p className="p" role="status">
+      Готово ✓ Имён из готового перевода: <strong className="nums">{num(hints + matched)}</strong>, из них сопоставлено с
+      английским: <strong className="nums">{num(matched)}</strong>. Остальные Толмач узнает, когда они встретятся в новых
+      главах.
+    </p>
   );
 }
 

@@ -55,7 +55,7 @@ export interface ApiCallRecord {
   jobId?: string | null;
   chapterId?: string | null;
   bookId?: string | null;
-  purpose: "translate" | "extract" | "repair" | "check" | "other";
+  purpose: "translate" | "extract" | "repair" | "check" | "glossary" | "other";
   /** Ключ идемпотентности: повтор записи с тем же ключом ничего не делает. */
   idemKey?: string | null;
   model: ModelId | string;

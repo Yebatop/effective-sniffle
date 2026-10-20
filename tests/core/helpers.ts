@@ -14,6 +14,7 @@ export function makeTerm(p: Partial<Term> & { en: string; ru: string }): Term {
     note: null,
     status: "checked",
     firstChapterId: null,
+    source: "auto",
     ...p,
   };
 }

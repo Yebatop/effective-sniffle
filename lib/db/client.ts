@@ -90,6 +90,9 @@ const OWN_TABLES: Record<string, string> = {
   reading_position: "paragraph_idx",
   reports: "token",
   login_attempts: "ok",
+  ref_chapters: "scanned",
+  ref_terms: "mentions",
+  glossary_jobs: "align_total",
 };
 
 /**

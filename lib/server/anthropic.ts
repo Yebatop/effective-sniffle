@@ -263,13 +263,14 @@ export const EXTRACT_INSTRUCTIONS = `Ты готовишь глоссарий д
 - Имена персонажей и их прозвища, титулы и обращения (Master, Elder, Young Master, Your Highness), названия мест, сект, кланов, организаций, техник и навыков, уровней силы, особых предметов, рас и существ, игровые термины (системные окна, классы, характеристики).
 - Не собирай обычные слова, которые переводятся как обычно.
 - Не повторяй уже известные термины. Если у известного персонажа в главе появилось другое имя или прозвище, верни этот термин с тем же en и новым именем в aliases.
+- Если дан список «ИМЕНА ИЗ ГОТОВОГО ПЕРЕВОДА» и новый термин главы — одно из них (тот же персонаж, место, предмет), ru бери ровно оттуда: читатель привык к этим написаниям.
 
 КАК ПЕРЕВОДИТЬ
 - Китайские имена в пиньине — по системе Палладия (Lin Wei → Линь Вэй, Xiao → Сяо, Zhang → Чжан). Корейские — по Концевичу (Kim Min-jun → Ким Мин Чжун). Японские — по Поливанову (Shinji → Синдзи). Европейские и выдуманные имена — практической транскрипцией.
 - Говорящие названия техник, сект, мест, предметов и уровней — переводи по смыслу, а не транслитерируй (Azure Cloud Sect → секта Лазурных Облаков). Устоявшиеся слова культивации передавай принятыми в русских переводах формами (qi → ци, dantian → даньтянь).
 - kind: name — персонажи; title — титулы и обращения; technique — техники, навыки, уровни; place; org — секты, кланы, организации; item; other.
 - gender — только для персонажей: m, f, n (бесполое/существо), unknown, если из текста не ясно. Для остального — null.
-- note — до 10 слов, только если без пометки легко ошибиться (например, «младший брат по секте» или «он же Призрачный Клинок»). Иначе null.
+- note — до 10 слов: что это или кто это. Всегда — для предметов, техник, званий, событий и слов, смысл которых не ясен из самого слова (по главе: обряд, артефакт, катастрофа…). Для персонажей — если без пометки легко ошибиться («младший брат по секте», «он же Призрачный Клинок»). Иначе null.
 
 КТО К КОМУ ОБРАЩАЕТСЯ
 - Для пар персонажей, которые в этой главе говорят друг с другом, реши, как по-русски один обращается к другому: ty или vy. Учитывай возраст, статус, близость, вежливость речи. from и to — английские имена (en) персонажей.
@@ -292,16 +293,20 @@ export async function extractTerms(input: {
   known: Array<{ en: string; ru: string; kind: string; aliases: string[] }>;
   knownAddresses: Array<{ fromEn: string; toEn: string; form: "ty" | "vy" }>;
   isFirstChapterOfBook: boolean;
+  /** Имена готового перевода, ещё не сопоставленные с английскими. */
+  hints?: Array<{ ru: string; kind: string; gender: string | null; note: string | null }>;
 }, opts?: { signal?: AbortSignal }): Promise<ExtractOutcome> {
   const known = [...input.known]
     .sort((a, b) => a.en.localeCompare(b.en))
     .map((t) => `${t.en} → ${t.ru} (${t.kind})${t.aliases.length ? ` [другие имена: ${t.aliases.join(", ")}]` : ""}`)
     .join("\n");
   const addresses = input.knownAddresses.map((a) => `${a.fromEn} → ${a.toEn}: ${a.form === "ty" ? "ты" : "вы"}`).join("\n");
+  const hints = (input.hints ?? []).map(hintLine).join("\n");
   const context = [
     input.isFirstChapterOfBook ? "Это первая глава книги, которую мы переводим." : null,
     known ? `ИЗВЕСТНЫЕ ТЕРМИНЫ\n${known}` : "Известных терминов пока нет.",
     addresses ? `ИЗВЕСТНЫЕ ОБРАЩЕНИЯ\n${addresses}` : null,
+    hints ? `ИМЕНА ИЗ ГОТОВОГО ПЕРЕВОДА (по-русски; английское написание пока неизвестно)\n${hints}` : null,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -346,6 +351,149 @@ export async function extractTerms(input: {
         register: parsed.register,
       },
     };
+  } catch (e) {
+    return { kind: "error", ...mapError(e), usage, model: served };
+  }
+}
+
+const KIND_RU: Record<string, string> = {
+  name: "персонаж",
+  title: "титул/обращение",
+  technique: "техника/навык",
+  place: "место",
+  org: "организация",
+  item: "предмет",
+  other: "термин",
+};
+const GENDER_RU: Record<string, string> = { m: "м", f: "ж", n: "ср" };
+
+function hintLine(h: { ru: string; kind: string; gender: string | null; note: string | null }): string {
+  const what = [KIND_RU[h.kind] ?? "термин", h.gender && GENDER_RU[h.gender] ? GENDER_RU[h.gender] : null].filter(Boolean).join(", ");
+  return `${h.ru} (${what})${h.note ? ` — ${h.note}` : ""}`;
+}
+
+// ── Глоссарий по готовому переводу ──────────────────────────────────────
+
+export type JsonOutcome<T> =
+  | { kind: "ok"; result: T; usage: Usage; model: string }
+  | { kind: "refused"; usage: Usage; model: string }
+  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string };
+
+const KIND_ENUM = z.enum(["name", "title", "technique", "place", "org", "item", "other"]);
+
+const ScanSchema = z.object({
+  terms: z.array(
+    z.object({
+      ru: z.string(),
+      kind: KIND_ENUM,
+      gender: z.enum(["m", "f", "n", "unknown"]).nullable(),
+      note: z.string().nullable(),
+      chapters: z.array(z.number()),
+    }),
+  ),
+});
+export type ScanResult = z.infer<typeof ScanSchema>;
+
+export const SCAN_INSTRUCTIONS = `Тебе дают несколько глав готового русского перевода веб-новеллы. Читатель привык к этому переводу, и наш переводчик продолжит книгу с тех же имён. Выпиши из глав имена собственные и особые термины так, как они написаны в этом переводе.
+
+ЧТО ВЫПИСЫВАТЬ
+- Персонажей (имена, фамилии, прозвища), титулы и звания, места, страны, организации, фракции, техники и навыки, уровни силы, особые предметы, расы и существа, системные и игровые термины, названия событий.
+- Не выписывай обычные слова, которые переводятся как обычно.
+
+КАК ЗАПИСЫВАТЬ
+- ru — начальная форма, как в словаре: именительный падеж, единственное число («Павла» → «Павел», «генералу Гарсии» → «Гарсия»). Звание отдельно от имени, если это не постоянное прозвище.
+- Полное имя и короткое (Максимилиан / Макс) — отдельными строками, у короткого в note напиши, чьё это сокращение.
+- kind: name — персонажи; title — титулы, звания, обращения; technique — техники, навыки, уровни; place; org — организации, фракции, кланы; item; other.
+- gender — только для персонажей: m, f, n (существо без пола), unknown. Для остального — null.
+- note — до 10 слов: кто это или что это (роль персонажа, суть предмета, события, звания). Если по главам не понять — null.
+- chapters — номера глав (из заголовков «ГЛАВА N» ниже), в которых встречается.
+
+Отвечай строго по схеме.`;
+
+/** Имена и термины из пачки глав готового перевода. Structured outputs, effort low. */
+export async function scanRefTerms(
+  input: { model: ModelId; chapters: Array<{ number: number; title: string; text: string }> },
+  opts?: { signal?: AbortSignal },
+): Promise<JsonOutcome<ScanResult>> {
+  const body = input.chapters.map((c) => `ГЛАВА ${c.number}${c.title ? ` — ${c.title}` : ""}\n\n${c.text}`).join("\n\n");
+  return jsonCall(input.model, SCAN_INSTRUCTIONS, body, ScanSchema, 6000, opts);
+}
+
+const AlignSchema = z.object({
+  pairs: z.array(
+    z.object({
+      en: z.string(),
+      ru: z.string(),
+      kind: KIND_ENUM,
+      gender: z.enum(["m", "f", "n", "unknown"]).nullable(),
+      aliases: z.array(z.string()),
+      note: z.string().nullable(),
+    }),
+  ),
+});
+export type AlignResult = z.infer<typeof AlignSchema>;
+
+export const ALIGN_INSTRUCTIONS = `Тебе дают одну главу веб-новеллы по-английски и ту же главу в готовом русском переводе. Составь словарь: как в этом переводе переданы имена собственные и особые термины английского текста.
+
+- en — как в английском тексте (начальная форма, без притяжательного 's).
+- ru — как в русском переводе, в начальной форме: именительный падеж, единственное число.
+- Бери персонажей, титулы и звания, места, организации, техники, уровни, предметы, расы, системные термины. Обычные слова не бери.
+- Если в русском тексте соответствия нет или ты не уверен — пропусти термин.
+- aliases — другие английские имена того же персонажа или предмета в этой главе.
+- kind: name, title, technique, place, org, item, other. gender — только для персонажей (m, f, n, unknown), иначе null.
+- note — до 10 слов: кто это или что это; null, если и так ясно.
+- Не повторяй пары из списка «УЖЕ ИЗВЕСТНО».
+
+Отвечай строго по схеме.`;
+
+/** Пары «английское → русское» по одной главе в двух версиях. */
+export async function alignRefTerms(
+  input: { model: ModelId; number: number; en: string; ru: string; known: Array<{ en: string; ru: string }> },
+  opts?: { signal?: AbortSignal },
+): Promise<JsonOutcome<AlignResult>> {
+  const known = input.known.map((k) => `${k.en} → ${k.ru}`).join("\n");
+  const body = [
+    known ? `УЖЕ ИЗВЕСТНО\n${known}` : null,
+    `ГЛАВА ${input.number} ПО-АНГЛИЙСКИ\n\n${input.en}`,
+    `ГЛАВА ${input.number} В ГОТОВОМ ПЕРЕВОДЕ\n\n${input.ru}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return jsonCall(input.model, ALIGN_INSTRUCTIONS, body, AlignSchema, 8000, opts);
+}
+
+/** Вызов со structured outputs: create (а не parse), чтобы оплаченный ответ не пропал из учёта. */
+async function jsonCall<T>(
+  model: ModelId,
+  instructions: string,
+  userText: string,
+  schema: z.ZodType<T>,
+  maxTokens: number,
+  opts?: { signal?: AbortSignal },
+): Promise<JsonOutcome<T>> {
+  const format = zodOutputFormat(schema);
+  let usage: Usage = { ...ZERO_USAGE };
+  let served: string = model;
+  try {
+    const response = await anthropic().messages.create(
+      {
+        model,
+        max_tokens: maxTokens,
+        system: [{ type: "text", text: instructions, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: userText }],
+        output_config: { effort: "low", format: { type: format.type, schema: format.schema } },
+      },
+      opts?.signal ? { signal: opts.signal } : undefined,
+    );
+    usage = toUsage(response.usage as RawUsage);
+    served = response.model;
+    if (response.stop_reason === "refusal") return { kind: "refused", usage, model: served };
+    const text = response.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+    try {
+      return { kind: "ok", result: format.parse(text) as T, usage, model: served };
+    } catch {
+      return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: true, usage, model: served };
+    }
   } catch (e) {
     return { kind: "error", ...mapError(e), usage, model: served };
   }

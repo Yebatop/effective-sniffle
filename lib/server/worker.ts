@@ -36,6 +36,7 @@ import {
 import { budgetState, monthKey, recordApiCall, reserve, settle } from "../db/money";
 import { getOrCreateSecret, getSettings } from "../db/misc";
 import { listAddresses, listTerms, mergeProposals } from "../db/terms";
+import { linkRefTerms, refHints, refTail } from "../db/reference";
 import {
   addTranslationCost,
   createTranslation,
@@ -83,6 +84,8 @@ const MAX_CHUNK_TRIES = 3;
 const REFUSED_PLACEHOLDER = "[Модель отказалась переводить этот абзац]";
 const SKIPPED_PLACEHOLDER = "[Абзац не переведён]";
 const HEARTBEAT_MS = 20_000;
+/** Подсказок из готового перевода в разборе главы — не больше (каждая ~15 токенов). */
+const HINTS_MAX = 150;
 
 /** Деньги в базе хранятся с точностью до 1e-6 $ — резерв и факт считаем так же, иначе остаются хвосты. */
 const usd6 = (x: number) => Math.ceil(x * 1e6) / 1e6;
@@ -233,7 +236,10 @@ async function prepare(d: Db, job: Job, now: () => number, heartbeatMs: number):
     await reviveTranslation(d, translationId);
   }
   const { prev } = await neighbors(d, chapter);
-  const prevChapterTail = prev ? await tailOfChapter(d, prev.id, 3) : [];
+  let prevChapterTail = prev ? await tailOfChapter(d, prev.id, 3) : [];
+  // Своего перевода прошлой главы нет — конец главы готового перевода:
+  // первая своя глава продолжит его тон и имена.
+  if (prevChapterTail.length === 0 && chapter.number != null) prevChapterTail = await refTail(d, book.id, chapter.number - 1, 3);
   return {
     d,
     job,
@@ -334,7 +340,9 @@ function worstFor(model: ModelId, inputTokens: number, maxTokens: number): numbe
 async function extractStep(ctx: Ctx): Promise<void> {
   const model = ctx.settings.extractModel;
   const text = ctx.paragraphs.map((p) => p.text).join("\n\n");
-  const worst = usd6(worstCaseUsd(model, estimateTokens(text) + 3000, 8000));
+  const hints = await refHints(ctx.d, ctx.book.id, HINTS_MAX);
+  const hintTokens = estimateTokens(hints.map((h) => `${h.ru} ${h.note ?? ""}`).join("\n")) + hints.length * 6;
+  const worst = usd6(worstCaseUsd(model, estimateTokens(text) + 3000 + hintTokens, 8000));
   await reserveOrBlock(ctx, worst);
   const isFirst = await isFirstChapterOfBook(ctx.d, ctx.chapter);
   const { result: out, takenOver, timedOut } = await supervised(ctx, (signal) =>
@@ -351,6 +359,7 @@ async function extractStep(ctx: Ctx): Promise<void> {
           })
           .filter((a): a is { fromEn: string; toEn: string; form: "ty" | "vy" } => a !== null),
         isFirstChapterOfBook: isFirst,
+        hints: hints.map((h) => ({ ru: h.ru, kind: h.kind, gender: h.gender, note: h.note })),
       },
       { signal },
     ),
@@ -364,6 +373,8 @@ async function extractStep(ctx: Ctx): Promise<void> {
   }
   if (out.kind !== "ok") return;
   await mergeProposals(ctx.d, ctx.book.id, ctx.chapter.id, out.result.terms, out.result.addresses);
+  // Термины, взявшие написание из готового перевода, перестают быть подсказками.
+  if (hints.length > 0) await linkRefTerms(ctx.d, ctx.book.id);
   // Рассказчик и стиль — только заполнить пустое: решения человека не трогаем.
   const patch: Parameters<typeof updateBook>[2] = {};
   if (ctx.book.narratorPerson == null && out.result.narrator?.person) patch.narratorPerson = out.result.narrator.person;
