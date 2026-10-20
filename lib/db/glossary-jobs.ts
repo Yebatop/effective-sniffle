@@ -68,7 +68,7 @@ export async function glossaryHeartbeat(
   d: Db,
   id: string,
   attempt: number,
-  patch?: Partial<{ stage: GlossaryJobStage; scanDone: number; scanTotal: number; alignDone: number; alignTotal: number }>,
+  patch?: Partial<{ stage: GlossaryJobStage; scanDone: number; scanTotal: number; alignDone: number; alignTotal: number; alignNumbers: number[] }>,
 ): Promise<boolean> {
   const progressed = patch?.scanDone != null || patch?.alignDone != null || patch?.stage != null;
   const r = await d.query(
@@ -78,10 +78,22 @@ export async function glossaryHeartbeat(
        scan_total = coalesce($6, scan_total),
        align_done = coalesce($7, align_done),
        align_total = coalesce($8, align_total),
+       align_numbers = coalesce($10::int[], align_numbers),
        retries = case when $9 then 0 else retries end
      where id = $1 and attempt = $2 and state = 'running'
      returning id`,
-    [id, attempt, LEASE_SECONDS, patch?.stage ?? null, patch?.scanDone ?? null, patch?.scanTotal ?? null, patch?.alignDone ?? null, patch?.alignTotal ?? null, progressed],
+    [
+      id,
+      attempt,
+      LEASE_SECONDS,
+      patch?.stage ?? null,
+      patch?.scanDone ?? null,
+      patch?.scanTotal ?? null,
+      patch?.alignDone ?? null,
+      patch?.alignTotal ?? null,
+      progressed,
+      patch?.alignNumbers ?? null,
+    ],
   );
   return r.rows.length > 0;
 }
@@ -106,14 +118,31 @@ export async function setGlossaryStateIf(
   return r.rows.length > 0;
 }
 
-/** Остановить по просьбе читателя: любая живая задача книги → stopped. */
-export async function stopGlossaryJob(d: Db, bookId: string): Promise<boolean> {
+/**
+ * Остановить по просьбе читателя: любая живая задача книги → stopped.
+ * expired — у задачи нет живого исполнителя (аренда истекла): её резерв
+ * бюджета больше никто не вернёт, это должен сделать вызывающий.
+ */
+export async function stopGlossaryJob(
+  d: Db,
+  bookId: string,
+): Promise<Array<{ id: string; reservedUsd: number; reservedMonth: string | null; expired: boolean }>> {
   const r = await d.query(
-    `update glossary_jobs set state = 'stopped', lease_until = null, updated_at = now()
-     where book_id = $1 and state in ${LIVE_STATES} returning id`,
+    `with live as (
+       select id, (lease_until is null or lease_until < now()) as expired
+       from glossary_jobs where book_id = $1 and state in ${LIVE_STATES} for update
+     )
+     update glossary_jobs g set state = 'stopped', lease_until = null, updated_at = now()
+     from live where g.id = live.id
+     returning g.id, g.reserved_usd, g.reserved_month, live.expired`,
     [bookId],
   );
-  return r.rows.length > 0;
+  return r.rows.map((row) => ({
+    id: String(row.id),
+    reservedUsd: Number(row.reserved_usd ?? 0),
+    reservedMonth: row.reserved_month == null ? null : String(row.reserved_month),
+    expired: Boolean(row.expired),
+  }));
 }
 
 export async function bumpGlossaryRetries(d: Db, id: string): Promise<number> {

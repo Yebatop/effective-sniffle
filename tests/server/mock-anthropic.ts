@@ -10,8 +10,9 @@
  *   буквы из списка KNOWN_NAMES. Waldo — по-русски так, как его пишет
  *   список «ИМЕНА ИЗ ГОТОВОГО ПЕРЕВОДА», если он есть, иначе «Уолдо».
  * - Глоссарий по готовому переводу: чтение глав — русские имена из
- *   REF_NAMES с номерами глав; сверка — пары, где английское имя есть в
- *   английской главе, а русское — в главе готового перевода.
+ *   REF_NAMES с номерами глав (ОБОРВИ в пачке — ответ обрывается на
+ *   max_tokens); сверка — пары, где английское имя есть в английской
+ *   главе, а русское — в главе готового перевода.
  * - /v1/models/:id — для проверки ключа.
  */
 
@@ -123,6 +124,23 @@ export async function startMockAnthropic(): Promise<{ url: string; calls: MockCa
         control.failNext -= 1;
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "mock: bad request" } }));
+        return;
+      }
+      // ОБОРВИ в пачке — ответ обрывается на max_tokens (каждый раз).
+      if (text.includes("ОБОРВИ")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "msg_cut",
+            type: "message",
+            role: "assistant",
+            model,
+            content: [{ type: "text", text: '{"terms": [{"ru": "Мар' }],
+            stop_reason: "max_tokens",
+            stop_sequence: null,
+            usage: { input_tokens: 3000, output_tokens: 12000 },
+          }),
+        );
         return;
       }
       // Чтение готового перевода: по разделам «ГЛАВА N».

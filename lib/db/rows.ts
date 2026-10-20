@@ -126,6 +126,7 @@ export function toGlossaryJob(r: Row): GlossaryJob {
     scanTotal: num(r.scan_total),
     alignDone: num(r.align_done),
     alignTotal: num(r.align_total),
+    alignNumbers: Array.isArray(r.align_numbers) ? (r.align_numbers as unknown[]).map(num) : [],
     leaseUntil: isoOrNull(r.lease_until),
     attempt: num(r.attempt),
     retries: num(r.retries),

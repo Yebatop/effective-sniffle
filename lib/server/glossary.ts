@@ -25,6 +25,7 @@ import {
   latestGlossaryJob,
   releaseGlossaryJob,
   setGlossaryStateIf,
+  stopGlossaryJob,
   takeOrphanGlossaryReservation,
   trackGlossaryReservation,
 } from "../db/glossary-jobs";
@@ -36,6 +37,7 @@ import {
   markScanned,
   mergeRefTerms,
   refCounts,
+  refPairByNumber,
   refPairCount,
   refPairs,
   refTermCounts,
@@ -56,6 +58,8 @@ export const SCAN_BATCH_WORDS = 9000;
 export const ALIGN_MAX = 12;
 /** Текст главы в сверке режется до этого — цена предсказуема и для огромных глав. */
 const ALIGN_MAX_CHARS = 40_000;
+/** И в чтении: одна огромная «глава» (весь том на странице) не упрётся в предел запроса. */
+const SCAN_MAX_CHARS = 60_000;
 /** Известных пар в запросе сверки — не больше. */
 const ALIGN_KNOWN_MAX = 150;
 
@@ -146,22 +150,25 @@ export async function runGlossaryJob(jobId: string, deps: GlossaryDeps = {}): Pr
         scanDone += batch.length;
         await beat(ctx, { scanDone });
       }
-      const pairs = await refPairs(d, job.bookId, ALIGN_MAX);
       stage = "align";
-      await beat(ctx, { stage, alignTotal: pairs.length, alignDone: 0 });
+      job.alignNumbers = await freezeAlign(ctx);
       job.alignDone = 0;
+    } else if (stage === "align" && job.alignDone === 0 && job.alignNumbers.length === 0) {
+      // Задача сразу со сверки (читать нечего): список ещё не заморожен.
+      job.alignNumbers = await freezeAlign(ctx);
     }
 
     if (stage === "align") {
-      const pairs = await refPairs(d, job.bookId, ALIGN_MAX);
-      for (let i = job.alignDone; i < pairs.length; i += 1) {
+      const numbers = job.alignNumbers;
+      for (let i = job.alignDone; i < numbers.length; i += 1) {
         if (worked && now() - ctx.started > budgetMs) {
           await relay();
           return "relayed";
         }
-        await alignPair(ctx, pairs[i]);
+        const pair = await refPairByNumber(d, job.bookId, numbers[i]);
+        if (pair) await alignPair(ctx, pair);
         worked = true;
-        await beat(ctx, { alignDone: i + 1, alignTotal: pairs.length });
+        await beat(ctx, { alignDone: i + 1 });
       }
     }
 
@@ -201,6 +208,13 @@ export async function runGlossaryJob(jobId: string, deps: GlossaryDeps = {}): Pr
   }
 }
 
+/** Номера глав для сверки — один раз, при переходе к ней: потом список не съезжает. */
+async function freezeAlign(ctx: Ctx): Promise<number[]> {
+  const numbers = (await refPairs(ctx.d, ctx.job.bookId, ALIGN_MAX)).map((p) => p.number);
+  await beat(ctx, { stage: "align", alignNumbers: numbers, alignTotal: numbers.length, alignDone: 0 });
+  return numbers;
+}
+
 /** Пачка: подряд, пока не больше SCAN_BATCH_WORDS слов (первая глава берётся всегда). */
 function pickBatch<T extends { words: number }>(list: T[]): T[] {
   const out: T[] = [];
@@ -214,7 +228,7 @@ function pickBatch<T extends { words: number }>(list: T[]): T[] {
 }
 
 async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRefChapters>>): Promise<void> {
-  const chapters = batch.map((c) => ({ number: c.number, title: c.title, text: c.paragraphs.join("\n\n") }));
+  const chapters = batch.map((c) => ({ number: c.number, title: c.title, text: c.paragraphs.join("\n\n").slice(0, SCAN_MAX_CHARS) }));
   const tokens = chapters.reduce((s, c) => s + estimateTokens(c.text), 0) + 2000;
   const worst = usd6(worstCaseUsd(GLOSSARY_MODEL, tokens, 6000));
   await reserveOrBlock(ctx, worst);
@@ -222,7 +236,23 @@ async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRef
   await account(ctx, out, worst);
   if (takenOver) throw new TakenOver();
   if (timedOut) throw new OutOfTime();
-  if (out.kind === "error") throw new ApiFailure(out.code, out.message, out.retryable);
+  // Пока шёл вызов, сбор могли остановить или готовый перевод убрать — тогда не писать.
+  await beat(ctx);
+  if (out.kind === "error") {
+    if (!deterministic(out)) throw new ApiFailure(out.code, out.message, out.retryable);
+    // Ответ оборвался, не разобрался или запрос отклонён: повтор того же не
+    // поможет. Пачку — пополам; одиночную главу — пропустить, иначе сбор
+    // встанет на ней навсегда.
+    if (batch.length > 1) {
+      const mid = Math.ceil(batch.length / 2);
+      await scanBatch(ctx, batch.slice(0, mid));
+      await scanBatch(ctx, batch.slice(mid));
+      return;
+    }
+    console.warn("glossary: глава пропущена", batch[0].number, out.message);
+    await markScanned(ctx.d, [batch[0].id]);
+    return;
+  }
   if (out.kind === "ok") {
     const numbers = batch.map((c) => c.number);
     await mergeRefTerms(
@@ -256,7 +286,12 @@ async function alignPair(ctx: Ctx, pair: { number: number; chapterId: string; re
   await account(ctx, out, worst);
   if (takenOver) throw new TakenOver();
   if (timedOut) throw new OutOfTime();
-  if (out.kind === "error") throw new ApiFailure(out.code, out.message, out.retryable);
+  await beat(ctx);
+  if (out.kind === "error") {
+    // Как и в чтении: пару, которая не выходит, пропускаем, а не повторяем без конца.
+    if (deterministic(out)) return;
+    throw new ApiFailure(out.code, out.message, out.retryable);
+  }
   if (out.kind !== "ok") return;
   await mergeReferenceTerms(
     ctx.d,
@@ -264,6 +299,11 @@ async function alignPair(ctx: Ctx, pair: { number: number; chapterId: string; re
     pair.chapterId,
     out.result.pairs.map((p) => ({ en: p.en, ru: p.ru, kind: p.kind, gender: p.gender, aliases: p.aliases, note: p.note })),
   );
+}
+
+/** Ошибка, которую повтор того же запроса не исправит (не деньги и не ключ). */
+function deterministic(out: Extract<JsonOutcome<unknown>, { kind: "error" }>): boolean {
+  return out.code === "unknown" && !out.retryable;
 }
 
 async function beat(ctx: Ctx, patch?: Parameters<typeof glossaryHeartbeat>[3]): Promise<void> {
@@ -297,6 +337,8 @@ async function supervised<T>(ctx: Ctx, fn: (signal: AbortSignal) => Promise<T>):
 }
 
 async function reserveOrBlock(ctx: Ctx, usd: number): Promise<void> {
+  // Времени на вызов не осталось — не занимать резерв, который потом некому вернуть.
+  if (ctx.started + CALL_DEADLINE_MS - ctx.now() < 5_000) throw new OutOfTime();
   if (!(await reserve(ctx.d, usd, ctx.limitUsd, ctx.month))) throw new BudgetBlocked();
   await trackGlossaryReservation(ctx.d, ctx.job.id, usd, ctx.month);
 }
@@ -389,6 +431,20 @@ export async function refSummary(d: Db, bookId: string): Promise<RefSummary> {
     estimateUsd: est.usd,
     job,
   };
+}
+
+/**
+ * Остановить сбор книги. У задачи без живого исполнителя (его убили, аренда
+ * истекла) резерв бюджета вернуть сразу: иначе он провисит до конца месяца.
+ */
+export async function stopGlossary(d: Db, bookId: string): Promise<boolean> {
+  const stopped = await stopGlossaryJob(d, bookId);
+  for (const s of stopped) {
+    if (!s.expired) continue;
+    const orphan = await takeOrphanGlossaryReservation(d, s.id);
+    if (orphan.usd > 0) await settle(d, orphan.usd, 0, orphan.month ?? monthKey());
+  }
+  return stopped.length > 0;
 }
 
 /** Нужно ли толкнуть задачу: в очереди или исполнитель пропал. */

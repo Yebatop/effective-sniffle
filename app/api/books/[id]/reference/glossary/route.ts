@@ -3,8 +3,7 @@
 import { after, type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { getBook } from "@/lib/db/books";
-import { stopGlossaryJob } from "@/lib/db/glossary-jobs";
-import { runGlossaryJob, startGlossaryJob } from "@/lib/server/glossary";
+import { runGlossaryJob, startGlossaryJob, stopGlossary } from "@/lib/server/glossary";
 import { fail, json, originOf, serverError } from "@/lib/server/http";
 
 export const maxDuration = 300;
@@ -32,7 +31,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
-    const stopped = await stopGlossaryJob(await db(), id);
+    const stopped = await stopGlossary(await db(), id);
     return json({ stopped });
   } catch (e) {
     return serverError(e);

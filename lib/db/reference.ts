@@ -40,18 +40,42 @@ export async function upsertRefChapter(
 ): Promise<{ created: boolean; updated: boolean }> {
   const sha = contentHash(input.paragraphs);
   const r = await d.query(
-    `insert into ref_chapters (book_id, number, title, paragraphs, words, url, content_sha256)
-     values ($1, $2, $3, $4, $5, $6, $7)
+    `insert into ref_chapters (book_id, number, title, paragraphs, words, url, urls, content_sha256)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)
      on conflict (book_id, number) do update
        set title = excluded.title, paragraphs = excluded.paragraphs, words = excluded.words,
-           url = excluded.url, content_sha256 = excluded.content_sha256, scanned = false, updated_at = now()
+           url = excluded.url, urls = excluded.urls, content_sha256 = excluded.content_sha256, scanned = false, updated_at = now()
        where ref_chapters.content_sha256 <> excluded.content_sha256
      returning (xmax = 0) as created`,
-    [bookId, input.number, tidy(input.title).slice(0, 500), input.paragraphs, countWordsRu(input.paragraphs), input.url, sha],
+    [bookId, input.number, tidy(input.title).slice(0, 500), input.paragraphs, countWordsRu(input.paragraphs), input.url, input.url ? [input.url] : [], sha],
   );
   const row = r.rows[0];
   if (!row) return { created: false, updated: false };
   return row.created ? { created: true, updated: false } : { created: false, updated: true };
+}
+
+/**
+ * Дописать часть главы («Глава 5.2» после «5.1»): абзацы — в конец, адрес
+ * части запоминается. Та же часть второй раз не дописывается. Главы ещё
+ * нет — часть становится её началом.
+ */
+export async function appendRefChapterPart(
+  d: Db,
+  bookId: string,
+  input: { number: number; title: string; paragraphs: string[]; url: string | null },
+): Promise<{ created: boolean; updated: boolean }> {
+  const existing = await d.query("select paragraphs, urls from ref_chapters where book_id = $1 and number = $2 for update", [bookId, input.number]);
+  const row = existing.rows[0];
+  if (!row) return upsertRefChapter(d, bookId, input);
+  const urls = Array.isArray(row.urls) ? (row.urls as unknown[]).map(String) : [];
+  if (input.url && urls.includes(input.url)) return { created: false, updated: false };
+  const paragraphs = [...(Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : []), ...input.paragraphs];
+  await d.query(
+    `update ref_chapters set paragraphs = $3, words = $4, urls = $5, content_sha256 = $6, scanned = false, updated_at = now()
+     where book_id = $1 and number = $2`,
+    [bookId, input.number, paragraphs, countWordsRu(paragraphs), input.url ? [...urls, input.url] : urls, contentHash(paragraphs)],
+  );
+  return { created: false, updated: true };
 }
 
 export async function refCounts(d: Db, bookId: string): Promise<{ count: number; minNumber: number | null; maxNumber: number | null; unscanned: number; unscannedWords: number }> {
@@ -106,6 +130,19 @@ export async function refPairs(d: Db, bookId: string, limit: number): Promise<Ar
     [bookId, limit],
   );
   return r.rows.map((row) => ({ number: Number(row.number), chapterId: String(row.chapter_id), refId: String(row.ref_id) }));
+}
+
+/** Пара для сверки по номеру главы (если главы с тех пор не удалили). */
+export async function refPairByNumber(d: Db, bookId: string, number: number): Promise<{ number: number; chapterId: string; refId: string } | null> {
+  const r = await d.query(
+    `select c.number, c.id as chapter_id, rc.id as ref_id
+     from chapters c join ref_chapters rc on rc.book_id = c.book_id and rc.number = c.number
+     where c.book_id = $1 and c.number = $2
+     order by c.created_at desc limit 1`,
+    [bookId, number],
+  );
+  const row = r.rows[0];
+  return row ? { number: Number(row.number), chapterId: String(row.chapter_id), refId: String(row.ref_id) } : null;
 }
 
 export async function refPairCount(d: Db, bookId: string): Promise<number> {

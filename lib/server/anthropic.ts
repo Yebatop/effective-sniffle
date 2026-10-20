@@ -377,7 +377,8 @@ function hintLine(h: { ru: string; kind: string; gender: string | null; note: st
 export type JsonOutcome<T> =
   | { kind: "ok"; result: T; usage: Usage; model: string }
   | { kind: "refused"; usage: Usage; model: string }
-  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string };
+  /** truncated — ответ оборвался на max_tokens: повтор того же запроса не поможет. */
+  | { kind: "error"; code: ErrorCode; message: string; retryable: boolean; usage: Usage; model: string; truncated?: boolean };
 
 const KIND_ENUM = z.enum(["name", "title", "technique", "place", "org", "item", "other"]);
 
@@ -410,13 +411,17 @@ export const SCAN_INSTRUCTIONS = `Тебе дают несколько глав 
 
 Отвечай строго по схеме.`;
 
+/** Предел ответа: список имён короткий, но место нужно и на обдумывание, если модель решит подумать. */
+export const SCAN_MAX_TOKENS = 12000;
+export const ALIGN_MAX_TOKENS = 12000;
+
 /** Имена и термины из пачки глав готового перевода. Structured outputs, effort low. */
 export async function scanRefTerms(
   input: { model: ModelId; chapters: Array<{ number: number; title: string; text: string }> },
   opts?: { signal?: AbortSignal },
 ): Promise<JsonOutcome<ScanResult>> {
   const body = input.chapters.map((c) => `ГЛАВА ${c.number}${c.title ? ` — ${c.title}` : ""}\n\n${c.text}`).join("\n\n");
-  return jsonCall(input.model, SCAN_INSTRUCTIONS, body, ScanSchema, 6000, opts);
+  return jsonCall(input.model, SCAN_INSTRUCTIONS, body, ScanSchema, SCAN_MAX_TOKENS, opts);
 }
 
 const AlignSchema = z.object({
@@ -459,7 +464,7 @@ export async function alignRefTerms(
   ]
     .filter(Boolean)
     .join("\n\n");
-  return jsonCall(input.model, ALIGN_INSTRUCTIONS, body, AlignSchema, 8000, opts);
+  return jsonCall(input.model, ALIGN_INSTRUCTIONS, body, AlignSchema, ALIGN_MAX_TOKENS, opts);
 }
 
 /** Вызов со structured outputs: create (а не parse), чтобы оплаченный ответ не пропал из учёта. */
@@ -488,11 +493,14 @@ async function jsonCall<T>(
     usage = toUsage(response.usage as RawUsage);
     served = response.model;
     if (response.stop_reason === "refusal") return { kind: "refused", usage, model: served };
+    if (response.stop_reason === "max_tokens") {
+      return { kind: "error", code: "unknown", message: "Ответ модели оборвался.", retryable: false, usage, model: served, truncated: true };
+    }
     const text = response.content.map((b) => (b.type === "text" ? b.text : "")).join("");
     try {
       return { kind: "ok", result: format.parse(text) as T, usage, model: served };
     } catch {
-      return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: true, usage, model: served };
+      return { kind: "error", code: "unknown", message: "Модель ответила не по схеме.", retryable: false, usage, model: served };
     }
   } catch (e) {
     return { kind: "error", ...mapError(e), usage, model: served };

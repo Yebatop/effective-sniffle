@@ -162,7 +162,10 @@ export async function mergeReferenceTerms(
       if (known.status === "checked") continue;
       const have = new Set([low(known.en), ...known.aliases.map(low)]);
       const newAliases = aliases.filter((a) => !have.has(low(a)) && !byName.has(low(a)));
-      const newRu = known.source === "auto" && low(known.ru) !== low(ru) ? ru : null;
+      // Совпало лишь другое имя (alias: «Max» у «Maximilian») — его русская
+      // форма не годится для основного написания термина.
+      const byMainName = low(known.en) === low(en);
+      const newRu = byMainName && known.source === "auto" && low(known.ru) !== low(ru) ? ru : null;
       const fillGender = known.kind === "name" && !known.gender && gender ? gender : null;
       const fillNote = !known.note && note ? note : null;
       if (!newRu && newAliases.length === 0 && !fillGender && !fillNote) continue;

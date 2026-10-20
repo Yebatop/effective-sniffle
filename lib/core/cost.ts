@@ -120,22 +120,26 @@ export function estimateGlossaryUsd(
   p: { scanWords: number; scanCalls: number; alignEnWords: number; alignRuWords: number; alignPairs: number },
 ): number {
   const zero = { cacheWrite5mTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 };
+  // Считать по одному среднему вызову и умножать: наценку за длинный вход
+  // (у Haiku — выше 100K токенов) берут с каждого вызова, а не с суммы.
   const scan =
     p.scanCalls > 0
-      ? usageCostUsd(model, {
-          inputTokens: p.scanWords * RU_TOKENS_PER_RU_WORD + p.scanCalls * GLOSSARY_FIXED_INPUT_TOKENS,
-          outputTokens: p.scanCalls * GLOSSARY_SCAN_OUTPUT_TOKENS,
+      ? p.scanCalls *
+        usageCostUsd(model, {
+          inputTokens: (p.scanWords * RU_TOKENS_PER_RU_WORD) / p.scanCalls + GLOSSARY_FIXED_INPUT_TOKENS,
+          outputTokens: GLOSSARY_SCAN_OUTPUT_TOKENS,
           ...zero,
         })
       : 0;
   const align =
     p.alignPairs > 0
-      ? usageCostUsd(model, {
+      ? p.alignPairs *
+        usageCostUsd(model, {
           inputTokens:
-            p.alignEnWords * EN_TOKENS_PER_WORD +
-            p.alignRuWords * RU_TOKENS_PER_RU_WORD +
-            p.alignPairs * (GLOSSARY_FIXED_INPUT_TOKENS + GLOSSARY_ALIGN_KNOWN_TOKENS),
-          outputTokens: p.alignPairs * GLOSSARY_ALIGN_OUTPUT_TOKENS,
+            (p.alignEnWords * EN_TOKENS_PER_WORD + p.alignRuWords * RU_TOKENS_PER_RU_WORD) / p.alignPairs +
+            GLOSSARY_FIXED_INPUT_TOKENS +
+            GLOSSARY_ALIGN_KNOWN_TOKENS,
+          outputTokens: GLOSSARY_ALIGN_OUTPUT_TOKENS,
           ...zero,
         })
       : 0;

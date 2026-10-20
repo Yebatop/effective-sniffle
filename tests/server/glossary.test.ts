@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { testDb, __setDbForTests, type Db } from "@/lib/db/client";
 import { importChapter } from "@/lib/db/books";
-import { getGlossaryJob } from "@/lib/db/glossary-jobs";
-import { budgetState } from "@/lib/db/money";
+import { claimGlossaryJob, getGlossaryJob, trackGlossaryReservation } from "@/lib/db/glossary-jobs";
+import { budgetState, monthKey, reserve } from "@/lib/db/money";
 import { saveSettings } from "@/lib/db/misc";
 import { listRefTerms, refCounts, upsertRefChapter } from "@/lib/db/reference";
 import { listTerms } from "@/lib/db/terms";
 import { createOrGetJob } from "@/lib/db/jobs";
-import { refSummary, runGlossaryJob, startGlossaryJob } from "@/lib/server/glossary";
+import { refSummary, runGlossaryJob, startGlossaryJob, stopGlossary } from "@/lib/server/glossary";
 import { runJob } from "@/lib/server/worker";
 import { __resetClientForTests } from "@/lib/server/anthropic";
 import { startMockAnthropic } from "./mock-anthropic";
@@ -158,18 +158,16 @@ describe("сбор глоссария по готовому переводу", (
     expect(terms.find((t) => t.en === "Mara")?.ru).toBe("Марра");
   });
 
-  test("ошибка модели — повтор с эстафетой, без двойной оплаты", async () => {
+  test("запрос отклонён (400) — пачка делится пополам, все главы прочитаны, резерв вернулся", async () => {
     const bookId = await setupBook();
     const { job } = await startGlossaryJob(bookId);
     mock.control.failNext = 1;
-    const first = await runGlossaryJob(job.id, { relay: async () => undefined, sleep: async () => undefined });
-    expect(first).toBe("failed");
-    // 400 — не повторяемая ошибка: задача упала, но можно запустить снова.
-    const again = await startGlossaryJob(bookId);
-    expect(again.created).toBe(true);
-    expect(await runToEnd(again.job.id)).toBe("done");
-    const budget = await budgetState(d, 300 / 92);
-    expect(budget.reservedUsd).toBe(0);
+    expect(await runToEnd(job.id)).toBe("done");
+    expect((await refCounts(d, bookId)).unscanned).toBe(0);
+    expect((await listRefTerms(d, bookId)).find((r) => r.ru === "Вальдо")?.lastNumber).toBe(2);
+    const scanCalls = mock.calls.filter((c) => JSON.stringify(c.body.system).includes("Выпиши из глав имена"));
+    expect(scanCalls.length).toBe(3);
+    expect((await budgetState(d, 300 / 92)).reservedUsd).toBe(0);
   });
 
   test("нечего собирать — понятная ошибка", async () => {
@@ -202,5 +200,43 @@ describe("перевод после готового перевода", () => {
     const prompt = JSON.stringify(translate?.body);
     expect(prompt).toContain("КОНЕЦ ПРЕДЫДУЩЕГО ТЕКСТА");
     expect(prompt).toContain("повела паром к Туманной Переправе");
+  });
+});
+
+describe("трудные главы и остановка", () => {
+  test("глава, на которой ответ всегда обрывается, пропускается — остальные прочитаны, сбор доходит до конца", async () => {
+    const bookId = await setupBook();
+    await upsertRefChapter(d, bookId, { number: 2, title: "Глава 2", paragraphs: ["ОБОРВИ: здесь слишком много имён.", "Вальдо молчал."], url: null });
+    const { job } = await startGlossaryJob(bookId);
+    expect(await runToEnd(job.id)).toBe("done");
+    expect((await refCounts(d, bookId)).unscanned).toBe(0);
+    const ref = await listRefTerms(d, bookId);
+    // Глава 2 пропущена, но Вальдо есть в главе 1.
+    expect(ref.find((r) => r.ru === "Вальдо")?.lastNumber).toBe(1);
+    expect(ref.find((r) => r.ru === "Фэн")).toBeTruthy();
+    const scanCalls = mock.calls.filter((c) => JSON.stringify(c.body.system).includes("Выпиши из глав имена"));
+    // 4 главы → пополам (2+2) → пара с плохой главой ещё пополам: 1 + 2 + 2 = 5 вызовов, не бесконечно.
+    expect(scanCalls.length).toBe(5);
+    expect((await budgetState(d, 300 / 92)).reservedUsd).toBe(0);
+  });
+
+  test("остановка задачи без живого исполнителя возвращает её резерв", async () => {
+    const bookId = await setupBook();
+    const { job } = await startGlossaryJob(bookId);
+    const claimed = await claimGlossaryJob(d, job.id);
+    expect(await reserve(d, 0.01, 300 / 92)).toBe(true);
+    await trackGlossaryReservation(d, job.id, 0.01, claimed!.reservedMonth ?? monthKey());
+    // Исполнителя убили: аренда истекла.
+    await d.query("update glossary_jobs set lease_until = now() - interval '5 minutes' where id = $1", [job.id]);
+    expect(await stopGlossary(d, bookId)).toBe(true);
+    expect((await budgetState(d, 300 / 92)).reservedUsd).toBe(0);
+    expect((await getGlossaryJob(d, job.id))?.state).toBe("stopped");
+  });
+
+  test("сверка идёт по списку, замороженному при переходе к ней", async () => {
+    const bookId = await setupBook();
+    const { job } = await startGlossaryJob(bookId);
+    expect(await runToEnd(job.id)).toBe("done");
+    expect((await getGlossaryJob(d, job.id))?.alignNumbers).toEqual([4, 3]);
   });
 });

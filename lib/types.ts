@@ -393,6 +393,7 @@ export interface GlossaryJob {
   scanTotal: number;
   alignDone: number;
   alignTotal: number;
+  alignNumbers: number[];
   leaseUntil: string | null;
   attempt: number;
   retries: number;

@@ -6,8 +6,8 @@
 import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { getBook, isUuid } from "@/lib/db/books";
-import { upsertRefChapter } from "@/lib/db/reference";
-import { chapterNumberFrom } from "@/lib/core/url";
+import { appendRefChapterPart, upsertRefChapter } from "@/lib/db/reference";
+import { resolveRefNumber } from "@/lib/core/refnumber";
 import { bearer, hasSession, importTokenValid } from "@/lib/server/access";
 import { fail, json, readJson, serverError } from "@/lib/server/http";
 import type { RefImportRequest, RefImportResponse } from "@/lib/types";
@@ -44,10 +44,12 @@ export async function POST(req: NextRequest) {
       const title = str(raw.chapterTitle, 500) ?? "";
       const url = str(raw.url, 2000);
       const expected = typeof raw.expectedNumber === "number" && Number.isInteger(raw.expectedNumber) && raw.expectedNumber > 0 ? raw.expectedNumber : null;
-      const parsed = chapterNumberFrom(title, url);
-      const number = parsed !== null && Number.isInteger(parsed) ? parsed : expected;
-      if (number === null) return fail(400, "not_chapter", `Не понял номер главы «${title.slice(0, 80)}».`);
-      const r = await upsertRefChapter(d, bookId, { number, title, paragraphs, url });
+      const resolved = resolveRefNumber(title, url, expected);
+      if (!resolved) return fail(400, "not_chapter", `Не понял номер главы «${title.slice(0, 80)}».`);
+      const { number, append } = resolved;
+      const r = append
+        ? await appendRefChapterPart(d, bookId, { number, title, paragraphs, url })
+        : await upsertRefChapter(d, bookId, { number, title, paragraphs, url });
       items.push({ number, ...r });
     }
     if (items.length === 0) return fail(400, "not_chapter", "В присланном нет текста главы.");

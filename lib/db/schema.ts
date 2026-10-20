@@ -234,6 +234,9 @@ create table if not exists ref_chapters (
   paragraphs text[] not null,
   words int not null default 0,
   url text,
+  -- Адреса частей: глава на сайте бывает разбита («Глава 5.1», «5.2») —
+  -- части складываются в одну главу по порядку.
+  urls text[] not null default '{}',
   content_sha256 text not null,
   -- Имена из главы уже собраны в ref_terms.
   scanned boolean not null default false,
@@ -278,6 +281,9 @@ create table if not exists glossary_jobs (
   scan_total int not null default 0,
   align_done int not null default 0,
   align_total int not null default 0,
+  -- Номера глав для сверки, замороженные при переходе к ней: список не
+  -- съезжает, если глав добавилось, пока шёл сбор.
+  align_numbers int[] not null default '{}',
   lease_until timestamptz,
   attempt int not null default 0,
   retries int not null default 0,

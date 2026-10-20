@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import { testDb, type Db } from "@/lib/db/client";
 import { importChapter } from "@/lib/db/books";
 import {
+  appendRefChapterPart,
   deleteReference,
   linkRefTerms,
   listRefBooks,
@@ -14,7 +15,7 @@ import {
   unscannedRefChapters,
   upsertRefChapter,
 } from "@/lib/db/reference";
-import { mergeProposals } from "@/lib/db/terms";
+import { listTerms, mergeProposals, mergeReferenceTerms } from "@/lib/db/terms";
 import { claimGlossaryJob, createOrGetGlossaryJob, glossaryHeartbeat, liveGlossaryJob, stopGlossaryJob } from "@/lib/db/glossary-jobs";
 import type { ExtractedChapter } from "@/lib/types";
 
@@ -77,6 +78,41 @@ describe("главы готового перевода", () => {
   });
 });
 
+describe("части глав", () => {
+  test("часть 2 дописывается к главе один раз; повтор той же части ничего не меняет", async () => {
+    const bookId = await book();
+    await upsertRefChapter(d, bookId, { number: 5, title: "Глава 5.1", paragraphs: ["Первая часть."], url: "https://ranobe.example/c5-1" });
+    expect(await appendRefChapterPart(d, bookId, { number: 5, title: "Глава 5.2", paragraphs: ["Вторая часть."], url: "https://ranobe.example/c5-2" })).toEqual({
+      created: false,
+      updated: true,
+    });
+    expect(await appendRefChapterPart(d, bookId, { number: 5, title: "Глава 5.2", paragraphs: ["Вторая часть."], url: "https://ranobe.example/c5-2" })).toEqual({
+      created: false,
+      updated: false,
+    });
+    expect(await refTail(d, bookId, 5, 5)).toEqual(["Первая часть.", "Вторая часть."]);
+    // Части без начала — сама становится главой.
+    expect(await appendRefChapterPart(d, bookId, { number: 6, title: "Глава 6.2", paragraphs: ["Середина."], url: null })).toEqual({ created: true, updated: false });
+  });
+});
+
+describe("пары из готового перевода", () => {
+  test("совпало только другое имя — основное русское написание термина не меняется", async () => {
+    const bookId = await book();
+    const ch = await d.query("select id from chapters where book_id = $1 limit 1", [bookId]);
+    const chapterId = String(ch.rows[0].id);
+    await mergeProposals(d, bookId, chapterId, [{ en: "Maximilian", ru: "Максимильян", kind: "name", aliases: ["Max"] }], []);
+    await mergeReferenceTerms(d, bookId, chapterId, [{ en: "Max", ru: "Макс", kind: "name", gender: "m" }]);
+    let t = (await listTerms(d, bookId)).find((x) => x.en === "Maximilian")!;
+    expect(t.ru).toBe("Максимильян");
+    expect(t.gender).toBe("m");
+    // А по основному имени — готовый перевод главнее предложенного моделью.
+    await mergeReferenceTerms(d, bookId, chapterId, [{ en: "Maximilian", ru: "Максимилиан", kind: "name" }]);
+    t = (await listTerms(d, bookId)).find((x) => x.en === "Maximilian")!;
+    expect(t).toMatchObject({ ru: "Максимилиан", source: "reference" });
+  });
+});
+
 describe("имена готового перевода", () => {
   test("слияние считает главы и раздвигает первую/последнюю; подсказки — свежие сверху; связанные уходят", async () => {
     const bookId = await book();
@@ -120,7 +156,7 @@ describe("задача сбора глоссария", () => {
     expect(await claimGlossaryJob(d, a.job.id)).toBeNull();
     expect(await glossaryHeartbeat(d, a.job.id, claimed!.attempt, { scanDone: 2 })).toBe(true);
 
-    expect(await stopGlossaryJob(d, bookId)).toBe(true);
+    expect(await stopGlossaryJob(d, bookId)).toHaveLength(1);
     expect(await liveGlossaryJob(d, bookId)).toBeNull();
     // Остановленную задачу её исполнитель больше не продлевает.
     expect(await glossaryHeartbeat(d, a.job.id, claimed!.attempt)).toBe(false);
