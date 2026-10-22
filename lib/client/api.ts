@@ -47,7 +47,7 @@ export interface LoginResponse {
 
 export interface BookDetail {
   book: Book;
-  chapters: Array<Chapter & { translated: boolean }>;
+  chapters: Array<Chapter & { translated: boolean; started?: boolean }>;
   spentUsd: number;
   /** Главы готового перевода (без текста). */
   ready?: ReadyHead[];

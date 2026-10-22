@@ -250,12 +250,18 @@ export async function getParagraphs(d: Db, chapterId: string): Promise<Paragraph
 }
 
 /** Главы книги по порядку: номер, затем время добавления. */
-export async function listChapters(d: Db, bookId: string): Promise<Array<Chapter & { translated: boolean }>> {
+/**
+ * Главы книги. `started` — перевод хоть раз запускали (задача есть, даже
+ * упавшая или остановленная): такую главу готовый перевод в оглавлении и в
+ * «Дальше» не заслоняет — в ней уже оплаченные абзацы и «Продолжить».
+ */
+export async function listChapters(d: Db, bookId: string): Promise<Array<Chapter & { translated: boolean; started: boolean }>> {
   const r = await d.query(
-    "select * from chapters where book_id = $1 order by number nulls last, created_at",
+    `select c.*, exists (select 1 from jobs j where j.chapter_id = c.id) as started
+     from chapters c where c.book_id = $1 order by c.number nulls last, c.created_at`,
     [bookId],
   );
-  return r.rows.map((row) => ({ ...toChapter(row), translated: row.current_translation_id != null }));
+  return r.rows.map((row) => ({ ...toChapter(row), translated: row.current_translation_id != null, started: Boolean(row.started) }));
 }
 
 /**

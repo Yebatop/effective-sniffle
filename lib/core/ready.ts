@@ -1,7 +1,8 @@
 /**
  * Соседи главы в книге, где есть и свои главы (английские, переведённые
  * или нет), и главы готового перевода. Для номера рядом выбирается лучшее:
- * свой перевод → готовый перевод → своя глава без перевода (с картой
+ * свой перевод → своя глава с начатым переводом (оплаченные абзацы,
+ * «Продолжить») → готовый перевод → своя глава без перевода (с картой
  * «Перевести»).
  */
 
@@ -9,6 +10,8 @@ export interface OwnHead {
   id: string;
   number: number;
   translated: boolean;
+  /** Перевод хоть раз запускали. */
+  started?: boolean;
 }
 
 export interface NeighborLink {
@@ -21,12 +24,19 @@ export function readyHref(bookId: string, number: number): string {
   return `/book/${encodeURIComponent(bookId)}/ready/${number}`;
 }
 
-export function pickAt(bookId: string, number: number, own: OwnHead[], ready: Set<number>): NeighborLink | null {
+/** Своя глава номера: переведённая, иначе с начатым переводом, иначе первая. */
+export function ownAt(number: number, own: OwnHead[]): OwnHead | null {
   const mine = own.filter((c) => c.number === number);
-  const translated = mine.find((c) => c.translated);
-  if (translated) return { number, href: `/read/${encodeURIComponent(translated.id)}`, kind: "own" };
+  return mine.find((c) => c.translated) ?? mine.find((c) => c.started) ?? mine[0] ?? null;
+}
+
+export function pickAt(bookId: string, number: number, own: OwnHead[], ready: Set<number>): NeighborLink | null {
+  const mine = ownAt(number, own);
+  const href = mine ? `/read/${encodeURIComponent(mine.id)}` : "";
+  if (mine?.translated) return { number, href, kind: "own" };
+  if (mine?.started) return { number, href, kind: "source" };
   if (ready.has(number)) return { number, href: readyHref(bookId, number), kind: "ready" };
-  if (mine[0]) return { number, href: `/read/${encodeURIComponent(mine[0].id)}`, kind: "source" };
+  if (mine) return { number, href, kind: "source" };
   return null;
 }
 

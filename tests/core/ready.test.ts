@@ -25,6 +25,11 @@ describe("соседи главы готового перевода", () => {
     expect(pickNeighbor("b", 3, 1, own, ready)?.number).toBe(135);
     expect(pickNeighbor("b", 1, -1, own, ready)).toBeNull();
   });
+  it("начатый перевод (оплаченные абзацы) готовый не заслоняет; пролог — номер 0", () => {
+    const withStarted = [...own, { id: "en-3", number: 3, translated: false, started: true }];
+    expect(pickAt("b", 3, withStarted, ready)).toEqual({ number: 3, href: "/read/en-3", kind: "source" });
+    expect(pickNeighbor("b", 1, -1, own, new Set([0, 1]))?.href).toBe("/book/b/ready/0");
+  });
 });
 
 describe("оглавление с готовым переводом", () => {
@@ -47,5 +52,21 @@ describe("оглавление с готовым переводом", () => {
       [138, "source", "/read/en-138"],
       [null, "source", "/read/x"],
     ]);
+  });
+  it("своя глава добавлена дважды и одна переведена — готовой строки нет, в любом порядке", () => {
+    const heads = [{ number: 11, title: "Глава 11", words: 100 }];
+    for (const order of [
+      [chapter("a", 11, false), chapter("b", 11, true)],
+      [chapter("b", 11, true), chapter("a", 11, false)],
+    ]) {
+      expect(tocRows("b", order, heads).map((r) => [r.kind, r.href]).sort()).toEqual([
+        ["own", "/read/b"],
+        ["source", "/read/a"],
+      ]);
+    }
+  });
+  it("перевод начат (упал или остановлен) — строка своей главы, не готовой", () => {
+    const started = { ...chapter("en-5", 5, false), started: true };
+    expect(tocRows("b", [started], [{ number: 5, title: "Глава 5", words: 100 }]).map((r) => [r.kind, r.href])).toEqual([["source", "/read/en-5"]]);
   });
 });

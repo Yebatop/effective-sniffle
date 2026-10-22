@@ -140,7 +140,7 @@ export default function BookScreen({ bookId }: { bookId: string }) {
           </div>
         </Link>
 
-        <ReadyTranslation bookId={book.id} usdRub={usdRub} />
+        <ReadyTranslation bookId={book.id} usdRub={usdRub} onRemoved={() => setReload((n) => n + 1)} />
 
         <BookSettings book={book} onSaved={(b) => setData((d) => (d ? { ...d, book: { ...d.book, ...b } } : d))} />
       </div>
@@ -278,7 +278,7 @@ const LIVE = ["queued", "running"];
  * Готовый перевод: главы чужого русского перевода, собранные кнопкой «Т»,
  * и сбор глоссария по ним (с ценой до запуска и ходом работы).
  */
-function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number | null }) {
+function ReadyTranslation({ bookId, usdRub, onRemoved }: { bookId: string; usdRub: number | null; onRemoved: () => void }) {
   const [s, setS] = useState<RefSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -393,7 +393,12 @@ function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number |
           className="btn btn-quiet"
           disabled={busy || live}
           onClick={() => {
-            if (window.confirm("Убрать главы готового перевода из Толмача? Глоссарий останется.")) void act(() => api.deleteReference(bookId));
+            if (!window.confirm("Убрать главы готового перевода из Толмача? Глоссарий останется.")) return;
+            void act(async () => {
+              await api.deleteReference(bookId);
+              // Оглавление книги держит готовые главы — перечитать.
+              onRemoved();
+            });
           }}
         >
           Убрать готовый перевод

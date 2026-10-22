@@ -449,4 +449,6 @@ export interface ReadyView {
   chapter: { number: number; title: string; paragraphs: string[]; words: number; url: string | null };
   prev: { number: number; href: string; kind: "own" | "ready" | "source" } | null;
   next: { number: number; href: string; kind: "own" | "ready" | "source" } | null;
+  /** Своя глава с тем же номером (английская или уже переведённая), если есть. */
+  own: { href: string; translated: boolean } | null;
 }

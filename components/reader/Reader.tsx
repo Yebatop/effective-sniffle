@@ -170,11 +170,12 @@ export default function Reader({ chapterId }: { chapterId: string }) {
     }
   }, [chapterId, settings]);
 
-  // Автостарт: только для главы, которую ещё ни разу не пробовали перевести.
+  // Автостарт: только для главы, которую ещё ни разу не пробовали перевести
+  // и у которой нет бесплатного готового перевода (тогда — карточка с выбором).
   useEffect(() => {
     if (!view || !settings || !settings.autostart || !settings.translateModel) return;
     if (autoStartedFor.current === chapterId) return;
-    if (view.translation || view.job) return;
+    if (view.translation || view.job || view.readyHref) return;
     autoStartedFor.current = chapterId;
     void startTranslate();
   }, [view, settings, chapterId, startTranslate]);

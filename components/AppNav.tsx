@@ -14,7 +14,7 @@ import { Icon } from "./Icon";
  */
 export default function AppNav() {
   const path = usePathname() || "/";
-  if (path.startsWith("/read/") || path.startsWith("/login")) return null;
+  if (path.startsWith("/read/") || /^\/book\/[^/]+\/ready\//.test(path) || path.startsWith("/login")) return null;
 
   const isLibrary = path === "/" || path.startsWith("/book");
   const isAdd = path.startsWith("/add") || path.startsWith("/share");

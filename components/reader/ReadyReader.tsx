@@ -8,6 +8,7 @@ import { DEFAULT_READER_PREFS, LINE_HEIGHTS, loadReaderPrefs, type ReaderPrefs }
 import type { ReadyView } from "@/lib/types";
 import { Icon } from "../Icon";
 import { ErrorNote, Loading } from "../bits";
+import { useWakeLock } from "./hooks";
 
 /**
  * Глава готового перевода: русский текст как есть, вид — как в читалке
@@ -19,6 +20,7 @@ export default function ReadyReader({ bookId, number }: { bookId: string; number
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [prefs, setPrefs] = useState<ReaderPrefs>(DEFAULT_READER_PREFS);
+  useWakeLock(prefs.keepAwake);
 
   useEffect(() => {
     setPrefs(loadReaderPrefs());
@@ -59,7 +61,7 @@ export default function ReadyReader({ bookId, number }: { bookId: string; number
     );
   }
 
-  const { chapter, book, prev, next } = view;
+  const { chapter, book, prev, next, own } = view;
   const style = {
     "--read-size": `${prefs.fontSize}px`,
     "--read-lh": String(LINE_HEIGHTS[prefs.lineHeight] ?? 1.75),
@@ -120,8 +122,13 @@ export default function ReadyReader({ bookId, number }: { bookId: string; number
               Оглавление
             </Link>
           </div>
+          {own && (
+            <p className="center small" style={{ marginTop: 12 }}>
+              <Link href={own.href}>{own.translated ? "Свой перевод этой главы" : "Своя глава (оригинал) · перевести самому"}</Link>
+            </p>
+          )}
           {chapter.url && (
-            <p className="center small muted" style={{ marginTop: 12 }}>
+            <p className="center small muted" style={{ marginTop: own ? 4 : 12 }}>
               <a href={chapter.url} target="_blank" rel="noopener noreferrer">
                 Открыть на сайте перевода
               </a>

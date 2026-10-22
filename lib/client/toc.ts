@@ -1,7 +1,9 @@
 /**
  * Оглавление книги: свои главы и главы готового перевода, по номеру. На
- * один номер — одна строка: свой перевод, иначе готовый перевод, иначе
- * глава без перевода (её откроет читалка с карточкой «Перевести»).
+ * один номер — одна строка: свой перевод (или начатый), иначе готовый
+ * перевод, иначе глава без перевода (её откроет читалка с карточкой
+ * «Перевести»). Своих глав одного номера несколько (добавлена повторно) —
+ * свои показываем все, готовая тогда не нужна.
  */
 
 import { readyHref } from "../core/ready";
@@ -15,19 +17,19 @@ export interface TocRow {
   kind: "own" | "ready" | "source";
 }
 
-export function tocRows(bookId: string, chapters: Array<Chapter & { translated: boolean }>, ready: ReadyHead[]): TocRow[] {
+export function tocRows(bookId: string, chapters: Array<Chapter & { translated: boolean; started?: boolean }>, ready: ReadyHead[]): TocRow[] {
   const readyBy = new Map(ready.map((r) => [r.number, r]));
   const rows: TocRow[] = [];
+  // Номера, где готовая глава не нужна: есть свой перевод или начатый.
   const usedReady = new Set<number>();
+  for (const c of chapters) if (c.number !== null && (c.translated || c.started)) usedReady.add(c.number);
   for (const c of chapters) {
     const r = c.number !== null ? readyBy.get(c.number) : undefined;
-    // Своей главы этого номера несколько (повторно добавлена) — показываем как есть.
-    if (!c.translated && r && !usedReady.has(r.number)) {
+    if (r && !usedReady.has(r.number)) {
       usedReady.add(r.number);
       rows.push({ key: `r${r.number}`, number: r.number, title: r.title || c.titleSrc, href: readyHref(bookId, r.number), kind: "ready" });
       continue;
     }
-    if (r) usedReady.add(r.number);
     rows.push({
       key: c.id,
       number: c.number,

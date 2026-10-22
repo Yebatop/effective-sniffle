@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { testDb, type Db } from "@/lib/db/client";
-import { importChapter } from "@/lib/db/books";
+import { importChapter, listChapters } from "@/lib/db/books";
+import { createOrGetJob, startedChapterIds } from "@/lib/db/jobs";
 import {
   appendRefChapterPart,
   getRefChapterByNumber,
@@ -99,6 +100,20 @@ describe("чтение готового перевода", () => {
       url: "https://ranobe.example/c2",
     });
     expect(await getRefChapterByNumber(d, bookId, 9)).toBeNull();
+  });
+
+  test("глава с начатым переводом помечена started — её готовый перевод не заслонит", async () => {
+    const bookId = await book();
+    const { chapter: c3 } = await importChapter(d, { ...chapter(3), source: "button", bookId });
+    expect((await listChapters(d, bookId)).map((c) => c.started)).toEqual([false, false]);
+    await createOrGetJob(d, { chapterId: c3.id, model: "claude-haiku-5-5", effort: "low" });
+    const list = await listChapters(d, bookId);
+    expect(list.map((c) => [c.number, c.started])).toEqual([
+      [2, false],
+      [3, true],
+    ]);
+    expect([...(await startedChapterIds(d, list.map((c) => c.id)))]).toEqual([c3.id]);
+    expect((await startedChapterIds(d, [])).size).toBe(0);
   });
 });
 

@@ -1,7 +1,7 @@
 import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { deleteChapter, getBook, getChapter, getParagraphs, neighbors } from "@/lib/db/books";
-import { latestJobForChapter, liveJobForChapter } from "@/lib/db/jobs";
+import { latestJobForChapter, liveJobForChapter, startedChapterIds } from "@/lib/db/jobs";
 import { getPosition, getSettings } from "@/lib/db/misc";
 import { listTerms } from "@/lib/db/terms";
 import { refNumbers } from "@/lib/db/reference";
@@ -14,14 +14,22 @@ import type { Chapter, ChapterView, NeighborView } from "@/lib/types";
 type Ctx = { params: Promise<{ id: string }> };
 
 /**
- * Сосед для «Дальше»/«Назад». Своего перевода у соседа нет, а глава
- * готового перевода с его номером (или с номером рядом, если соседа в
- * книге нет) есть — её и предложить читать.
+ * Сосед для «Дальше»/«Назад». Своего перевода у соседа нет и перевод его
+ * не начинали, а глава готового перевода с его номером (или с номером
+ * рядом, если соседа в книге нет) есть — её и предложить читать.
  */
-function neighborView(bookId: string, c: Chapter | null, url: string | null, fallbackNumber: number | null, ready: Set<number>): NeighborView {
+function neighborView(
+  bookId: string,
+  c: Chapter | null,
+  url: string | null,
+  fallbackNumber: number | null,
+  ready: Set<number>,
+  started: Set<string>,
+): NeighborView {
   const translated = Boolean(c?.currentTranslationId);
   const number = c ? c.number : fallbackNumber;
-  const ready_ = !translated && number !== null && number > 0 && ready.has(number) ? readyHref(bookId, number) : null;
+  const mine = translated || (c !== null && started.has(c.id));
+  const ready_ = !mine && number !== null && ready.has(number) ? readyHref(bookId, number) : null;
   return { chapterId: c?.id ?? null, url: c?.url ?? url, translated, readyHref: ready_ };
 }
 
@@ -43,6 +51,7 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
       latestJobForChapter(d, id),
       refNumbers(d, book.id),
     ]);
+    const started = await startedChapterIds(d, [near.prev?.id, near.next?.id].filter((x): x is string => Boolean(x)));
     let translation: ChapterView["translation"] = null;
     if (chapter.currentTranslationId) {
       const t = await getTranslation(d, chapter.currentTranslationId);
@@ -64,8 +73,8 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
       paragraphs,
       translation,
       job,
-      prev: neighborView(book.id, near.prev, chapter.prevUrl, chapter.number !== null ? chapter.number - 1 : null, ready),
-      next: neighborView(book.id, near.next, chapter.nextUrl, chapter.number !== null ? chapter.number + 1 : null, ready),
+      prev: neighborView(book.id, near.prev, chapter.prevUrl, chapter.number !== null ? chapter.number - 1 : null, ready, started),
+      next: neighborView(book.id, near.next, chapter.nextUrl, chapter.number !== null ? chapter.number + 1 : null, ready, started),
       terms,
       position: position && position.chapterId === id ? { paragraphIdx: position.paragraphIdx } : null,
       estimate,
