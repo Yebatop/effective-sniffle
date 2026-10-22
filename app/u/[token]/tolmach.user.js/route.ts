@@ -4,14 +4,14 @@
  * увидев .user.js, и будет обновлять скрипт по этому же адресу.
  */
 
-import { createHash } from "node:crypto";
 import { type NextRequest } from "next/server";
-import { USERSCRIPT_BODY } from "@/lib/generated/userscript";
+import { USERSCRIPT_BODY, USERSCRIPT_BUILT_AT } from "@/lib/generated/userscript";
 import { importTokenValid } from "@/lib/server/access";
 import { originOf } from "@/lib/server/http";
+import { userscriptVersion } from "@/lib/server/userscript-version";
 
-// Версия меняется вместе с содержимым — менеджер скриптов увидит обновление.
-const VERSION = `1.0.${parseInt(createHash("sha256").update(USERSCRIPT_BODY).digest("hex").slice(0, 7), 16)}`;
+// Версия растёт с каждой выкладкой — менеджер скриптов увидит обновление.
+const VERSION = userscriptVersion(USERSCRIPT_BUILT_AT);
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
