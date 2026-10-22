@@ -141,6 +141,37 @@ describe("имена готового перевода", () => {
   });
 });
 
+describe("связь имён с глоссарием", () => {
+  test("написание одно — связывается при любом роде; два термина с тем же написанием — только тот же род", async () => {
+    const bookId = await book();
+    const ch = await d.query("select id from chapters where book_id = $1 limit 1", [bookId]);
+    const chapterId = String(ch.rows[0].id);
+    await mergeRefTerms(d, bookId, [
+      { ru: "Секта Лазурного Облака", kind: "org", numbers: [1] },
+      { ru: "Тень", kind: "name", gender: "m", numbers: [2] },
+    ]);
+    await mergeProposals(
+      d,
+      bookId,
+      chapterId,
+      [
+        { en: "Azure Cloud Sect", ru: "Секта Лазурного Облака", kind: "place" },
+        { en: "Shadow Step", ru: "Тень", kind: "technique" },
+        { en: "Shadow", ru: "Тень", kind: "name" },
+      ],
+      [],
+    );
+    expect(await linkRefTerms(d, bookId)).toBe(2);
+    const terms = await listTerms(d, bookId);
+    const hints = await refHints(d, bookId, 10);
+    expect(hints).toEqual([]);
+    const { rows } = await d.query("select ru, term_id from ref_terms where book_id = $1 order by ru", [bookId]);
+    const byRu = new Map(rows.map((r) => [String(r.ru), String(r.term_id)]));
+    expect(byRu.get("Тень")).toBe(terms.find((t) => t.en === "Shadow")?.id);
+    expect(byRu.get("Секта Лазурного Облака")).toBe(terms.find((t) => t.en === "Azure Cloud Sect")?.id);
+  });
+});
+
 describe("задача сбора глоссария", () => {
   test("одна живая на книгу, захват с арендой, остановка", async () => {
     const bookId = await book();

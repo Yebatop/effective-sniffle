@@ -14,6 +14,8 @@
 const TRACKING_PARAMS = new Set([
   "fbclid", "gclid", "dclid", "gbraid", "wbraid", "yclid", "msclkid", "twclid",
   "mc_cid", "mc_eid", "igshid", "_ga", "_gl", "ref", "ref_src", "ref_url",
+  // Яндекс дописывает к ссылкам из поиска.
+  "ysclid",
 ]);
 
 function isTracking(key: string): boolean {

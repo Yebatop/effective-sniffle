@@ -227,8 +227,11 @@ describe("трудные главы и остановка", () => {
     expect(ref.find((r) => r.ru === "Вальдо")?.lastNumber).toBe(1);
     expect(ref.find((r) => r.ru === "Фэн")).toBeTruthy();
     const scanCalls = mock.calls.filter((c) => JSON.stringify(c.body.system).includes("Выпиши из глав имена"));
-    // 4 главы → пополам (2+2) → пара с плохой главой ещё пополам: 1 + 2 + 2 = 5 вызовов, не бесконечно.
+    // Пачка из 4 глав оборвалась → дальше по одной: 1 + 4 = 5 вызовов, не бесконечно.
     expect(scanCalls.length).toBe(5);
+    // Прогресс — по прочитанным главам: пропущенная тоже считается, но не дважды.
+    const finished = await getGlossaryJob(d, job.id);
+    expect(finished?.scanDone).toBe(4);
     expect((await budgetState(d, 300 / 92)).reservedUsd).toBe(0);
   });
 

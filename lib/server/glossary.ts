@@ -146,9 +146,9 @@ export async function runGlossaryJob(jobId: string, deps: GlossaryDeps = {}): Pr
         }
         const batch = pickBatch(await unscannedRefChapters(d, job.bookId, SCAN_BATCH_CHAPTERS));
         if (batch.length === 0) break;
-        await scanBatch(ctx, batch);
+        const read = await scanBatch(ctx, batch);
         worked = true;
-        scanDone += batch.length;
+        scanDone += read;
         await beat(ctx, { scanDone });
       }
       stage = "align";
@@ -231,8 +231,16 @@ function pickBatch<T extends { words: number; scanAlone: boolean }>(list: T[]): 
   return out;
 }
 
-async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRefChapters>>): Promise<void> {
-  const chapters = batch.map((c) => ({ number: c.number, title: c.title, text: c.paragraphs.join("\n\n").slice(0, SCAN_MAX_CHARS) }));
+/** Отрезать текст, не разрывая суррогатную пару (обрывок эмодзи — недопустимый UTF-8 в запросе). */
+function cut(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
+/** Прочитать пачку; вернёт, сколько глав помечено прочитанными. */
+async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRefChapters>>): Promise<number> {
+  const chapters = batch.map((c) => ({ number: c.number, title: c.title, text: cut(c.paragraphs.join("\n\n"), SCAN_MAX_CHARS) }));
   const tokens = chapters.reduce((s, c) => s + estimateTokens(c.text), 0) + 2000;
   const worst = usd6(worstCaseUsd(GLOSSARY_MODEL, tokens, SCAN_MAX_TOKENS));
   await reserveOrBlock(ctx, worst);
@@ -242,13 +250,16 @@ async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRef
   if (timedOut) throw new OutOfTime();
   if (out.kind === "error" && !contentDependent(out)) throw new ApiFailure(out.code, out.message, out.retryable);
   const done = batch.map((c) => ({ id: c.id, sha: c.sha }));
-  await writeIfStillOurs(ctx, async (tx) => {
+  return writeIfStillOurs(ctx, async (tx): Promise<number> => {
     if (out.kind === "error") {
       // Ответ оборвался, не разобрался или запрос слишком длинный — повтор
       // того же не поможет. Пачку — впредь по одной главе (каждая со своей
       // отметкой: обрыв посреди не заставит платить за всё снова);
       // одиночную главу — пропустить, иначе сбор встанет на ней навсегда.
-      if (batch.length > 1) return markScanAlone(tx, batch.map((c) => c.id));
+      if (batch.length > 1) {
+        await markScanAlone(tx, batch.map((c) => c.id));
+        return 0;
+      }
       console.warn("glossary: глава пропущена", batch[0].number, out.message);
       return markScanned(tx, done);
     }
@@ -264,15 +275,15 @@ async function scanBatch(ctx: Ctx, batch: Awaited<ReturnType<typeof unscannedRef
       );
     }
     // Отказ модели — главу не мучаем: имена из неё соберутся из соседних.
-    await markScanned(tx, done);
+    return markScanned(tx, done);
   });
 }
 
 async function alignPair(ctx: Ctx, pair: { number: number; chapterId: string; refId: string }): Promise<void> {
   const [en, ru, terms] = await Promise.all([getParagraphs(ctx.d, pair.chapterId), getRefChapter(ctx.d, pair.refId), listTerms(ctx.d, ctx.job.bookId)]);
   if (!ru || en.length === 0) return;
-  const enText = en.map((p) => p.text).join("\n\n").slice(0, ALIGN_MAX_CHARS);
-  const ruText = ru.paragraphs.join("\n\n").slice(0, ALIGN_MAX_CHARS);
+  const enText = cut(en.map((p) => p.text).join("\n\n"), ALIGN_MAX_CHARS);
+  const ruText = cut(ru.paragraphs.join("\n\n"), ALIGN_MAX_CHARS);
   const known = terms
     .filter((t) => t.source === "reference" || t.status === "checked")
     .slice(0, ALIGN_KNOWN_MAX)
@@ -316,11 +327,11 @@ function contentDependent(out: Extract<JsonOutcome<unknown>, { kind: "error" }>)
  * запись, «Остановить» и «Убрать готовый перевод» ждут, а если задачу уже
  * остановили или сменили — не писать ничего.
  */
-async function writeIfStillOurs(ctx: Ctx, fn: (tx: Db) => Promise<void>): Promise<void> {
-  await withTx(ctx.d, async (tx) => {
+async function writeIfStillOurs<T>(ctx: Ctx, fn: (tx: Db) => Promise<T>): Promise<T> {
+  return withTx(ctx.d, async (tx) => {
     const r = await tx.query("select 1 from glossary_jobs where id = $1 and attempt = $2 and state = 'running' for update", [ctx.job.id, ctx.job.attempt]);
     if (r.rows.length === 0) throw new TakenOver();
-    await fn(tx);
+    return fn(tx);
   });
 }
 

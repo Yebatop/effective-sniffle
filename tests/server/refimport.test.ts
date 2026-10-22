@@ -78,4 +78,41 @@ describe("приём глав готового перевода", () => {
     await markScanned(d, [{ id: row.id, sha: row.sha }]);
     expect((await unscannedRefChapters(d, bookId, 10)).map((r) => r.number)).toEqual([5]);
   });
+
+  test("тот же адрес с хвостом из поиска, слэшем или www — та же глава, не конфликт", async () => {
+    const bookId = await book();
+    await put(bookId, "Глава 8", "https://ranobe.example/b/reed/c8", "Глава восемь", null);
+    for (const u of ["https://ranobe.example/b/reed/c8/", "http://ranobe.example/b/reed/c8?ysclid=abc123", "https://www.ranobe.example/b/reed/c8?utm_source=tg"]) {
+      expect(await put(bookId, "Глава 8", u, "Глава восемь, правка", null)).toMatchObject({ kind: "ok", number: 8 });
+    }
+    // «Назад» со слэшем на конце находит главу, записанную без него.
+    expect(await put(bookId, "Эпилог", "https://ranobe.example/b/reed/c9", "Эпилог", null, "https://ranobe.example/b/reed/c8/")).toMatchObject({ kind: "ok", number: 9 });
+  });
+
+  test("первая часть главы из частей, пришедшая снова, главу не урезает", async () => {
+    const bookId = await book();
+    await put(bookId, "Глава 5.1", url(1, "5-1"), "Часть 1", null);
+    await put(bookId, "Глава 5.2", url(1, "5-2"), "Часть 2", 6);
+    expect(await put(bookId, "Глава 5.1", url(1, "5-1"), "Часть 1", null)).toMatchObject({ kind: "ok", created: false, updated: false });
+    expect(await refTail(d, bookId, 5, 5)).toEqual(["Часть 1", "Часть 2"]);
+  });
+
+  test("обход начали со второй части — первая потом встаёт в начало", async () => {
+    const bookId = await book();
+    expect(await put(bookId, "Глава 5.2", url(1, "5-2"), "Часть 2", null)).toMatchObject({ kind: "ok", number: 5 });
+    expect(await put(bookId, "Глава 5.1", url(1, "5-1"), "Часть 1", null)).toMatchObject({ kind: "ok", number: 5, updated: true });
+    expect(await refTail(d, bookId, 5, 5)).toEqual(["Часть 1", "Часть 2"]);
+  });
+
+  test("часть 2 без связи с прошлой главой не дописывается к чужой главе", async () => {
+    const bookId = await book();
+    await put(bookId, "Глава 5", "https://ranobe.example/a/c5", "Книга А, глава 5", null);
+    // Обход по другой книге сайта начат с «Глава 5.2»: ни ожидаемого номера, ни знакомой ссылки «назад».
+    expect(await put(bookId, "Глава 5.2", "https://ranobe.example/b/c5-2", "Книга Б, 5.2", null, "https://ranobe.example/b/c5-1")).toEqual({
+      kind: "conflict",
+      number: 5,
+    });
+    expect(await refTail(d, bookId, 5, 5)).toEqual(["Книга А, глава 5"]);
+  });
 });
+

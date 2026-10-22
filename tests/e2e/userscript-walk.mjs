@@ -123,7 +123,7 @@ const waitFor = async (fn, ms) => {
 };
 const hasButton = () => page1.evaluate(() => Boolean(document.querySelector("tolmach-button")));
 const tap = () => page1.locator("tolmach-button .btn").click();
-const walkState = () => page1.evaluate(() => localStorage.getItem("gm:tolmach:walk"));
+const walkState = () => page1.evaluate(() => localStorage.getItem("gm:tolmach:walk:" + location.host));
 
 try {
   await page1.goto(`${BASE}/ru/ch-1`);
@@ -166,6 +166,7 @@ try {
   await waitFor(hasButton, 8000);
   await tap();
   await page1.getByText("Готовый перевод: эту и все следующие").click();
+  await page1.getByText("Salt Road").click();
   await waitFor(() => imports.length >= 1, 8000);
   // Вторая вкладка того же сайта посреди обхода: сама ничего не берёт и никуда не уходит.
   const page2 = await ctx.newPage();
@@ -176,11 +177,11 @@ try {
   check("вторая вкладка обход не перехватывает", /\/ru\/ch-2$/.test(page2.url()) && fromTab2 <= 1, page2.url() + " / " + fromTab2);
   await page2.locator("tolmach-button .btn").click();
   const menu2 = await page2.locator("tolmach-button .menu").innerText();
-  check("…а её меню знает про идущий обход", /Продолжить обход «Salt Road»/.test(menu2), menu2.replace(/\s+/g, " "));
-  await page2.getByText(/Продолжить обход/).click();
+  check("…а её меню знает про идущий обход", /Обход «Salt Road» идёт в другой вкладке/.test(menu2) && !/Продолжить обход|Забыть/.test(menu2), menu2.replace(/\s+/g, " "));
+  await page2.getByText(/идёт в другой вкладке/).click();
   await page2.waitForTimeout(500);
   const toast2 = await page2.locator("tolmach-button .toast").innerText();
-  check("…и не даёт вести его в двух вкладках сразу", /идёт в другой вкладке/.test(toast2), toast2);
+  check("…и не даёт вести его в двух вкладках сразу", /Остановите его там/.test(toast2), toast2);
   await page2.close();
   await tap();
   await page1.getByText("Остановить").click();
@@ -195,9 +196,9 @@ try {
   await page1.evaluate(() => {
     const raw = JSON.stringify({
       v: 2, walkId: "other-tab", host: location.host, bookId: "book-1", bookTitle: "Salt Road", total: -1, done: 2, lastNumber: 2,
-      lastSig: null, skipped: 0, seen: [], navigatedAt: Date.now(), startedAt: Date.now(), updatedAt: Date.now(), beat: Date.now() - 60000,
+      lastSig: null, skipped: 0, seen: [], navigatedAt: Date.now(), navToken: "stale", startedAt: Date.now(), updatedAt: Date.now(), beat: Date.now() - 60000,
     });
-    localStorage.setItem("gm:tolmach:walk", JSON.stringify(raw));
+    localStorage.setItem("gm:tolmach:walk:" + location.host, JSON.stringify(raw));
   });
   await page1.goto(`${BASE}/ru/ch-3`);
   await page1.waitForTimeout(7000);

@@ -65,10 +65,14 @@ export async function upsertRefChapter(
   input: { number: number; title: string; paragraphs: string[]; url: string | null },
 ): Promise<RefWriteResult> {
   const sha = contentHash(input.paragraphs);
-  const prev = await d.query("select urls, content_sha256 from ref_chapters where book_id = $1 and number = $2", [bookId, input.number]);
+  const prev = await d.query("select urls, paragraphs, content_sha256 from ref_chapters where book_id = $1 and number = $2", [bookId, input.number]);
   const old = prev.rows[0];
   if (old) {
     const urls = Array.isArray(old.urls) ? (old.urls as unknown[]).map(String) : [];
+    const paras = Array.isArray(old.paragraphs) ? (old.paragraphs as unknown[]).map(String) : [];
+    // Первая часть главы, собранной из частей, пришла снова — глава уже полнее, не урезаем.
+    if (urls.length > 1 && input.url && urls[0] === input.url) return { created: false, updated: false };
+    if (startsWith(paras, input.paragraphs) && paras.length > input.paragraphs.length) return { created: false, updated: false };
     if (urls.length > 0 && input.url && !urls.includes(input.url) && String(old.content_sha256) !== sha) {
       return { created: false, updated: false, conflict: true };
     }
@@ -97,12 +101,17 @@ export async function appendRefChapterPart(
   d: Db,
   bookId: string,
   input: { number: number; title: string; paragraphs: string[]; url: string | null },
+  opts: { linked: boolean } = { linked: true },
 ): Promise<RefWriteResult> {
   const existing = await d.query("select paragraphs, urls from ref_chapters where book_id = $1 and number = $2 for update", [bookId, input.number]);
   const row = existing.rows[0];
   if (!row) return upsertRefChapter(d, bookId, input);
   const urls = Array.isArray(row.urls) ? (row.urls as unknown[]).map(String) : [];
   if (input.url && urls.includes(input.url)) return { created: false, updated: false };
+  // Связь с прошлой главой не установлена (обход начат с середины, а «назад»
+  // не ведёт в эту книгу) — дописывать к чужому тексту нельзя: скорее всего,
+  // выбрана не та книга.
+  if (!opts.linked && urls.length > 0) return { created: false, updated: false, conflict: true };
   const paragraphs = [...(Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : []), ...input.paragraphs];
   await d.query(
     `update ref_chapters set paragraphs = $3, words = $4, urls = $5, content_sha256 = $6, scanned = false, updated_at = now()
@@ -110,6 +119,35 @@ export async function appendRefChapterPart(
     [bookId, input.number, paragraphs, countWordsRu(paragraphs), input.url ? [...urls, input.url] : urls, contentHash(paragraphs)],
   );
   return { created: false, updated: true };
+}
+
+/**
+ * Дописать часть в начало главы («5.1», когда «5.2» уже взята — обход
+ * начинали со второй части).
+ */
+export async function prependRefChapterPart(
+  d: Db,
+  bookId: string,
+  input: { number: number; title: string; paragraphs: string[]; url: string | null },
+): Promise<RefWriteResult> {
+  const existing = await d.query("select paragraphs, urls from ref_chapters where book_id = $1 and number = $2 for update", [bookId, input.number]);
+  const row = existing.rows[0];
+  if (!row) return upsertRefChapter(d, bookId, input);
+  const urls = Array.isArray(row.urls) ? (row.urls as unknown[]).map(String) : [];
+  if (input.url && urls.includes(input.url)) return { created: false, updated: false };
+  const paragraphs = [...input.paragraphs, ...(Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : [])];
+  await d.query(
+    `update ref_chapters set title = $3, paragraphs = $4, words = $5, url = $6, urls = $7, content_sha256 = $8, scanned = false, updated_at = now()
+     where book_id = $1 and number = $2`,
+    [bookId, input.number, tidy(input.title).slice(0, 500), paragraphs, countWordsRu(paragraphs), input.url, input.url ? [input.url, ...urls] : urls, contentHash(paragraphs)],
+  );
+  return { created: false, updated: true };
+}
+
+function startsWith(all: string[], head: string[]): boolean {
+  if (head.length === 0 || head.length > all.length) return false;
+  for (let i = 0; i < head.length; i++) if (all[i] !== head[i]) return false;
+  return true;
 }
 
 export async function refCounts(d: Db, bookId: string): Promise<{ count: number; minNumber: number | null; maxNumber: number | null; unscanned: number; unscannedWords: number }> {
@@ -141,14 +179,15 @@ export async function unscannedRefChapters(d: Db, bookId: string, limit: number)
 }
 
 /** Пометить прочитанными — только если текст не поменялся с начала чтения (кнопка могла дописать часть). */
-export async function markScanned(d: Db, items: Array<{ id: string; sha: string }>): Promise<void> {
-  if (items.length === 0) return;
-  await d.query(
+export async function markScanned(d: Db, items: Array<{ id: string; sha: string }>): Promise<number> {
+  if (items.length === 0) return 0;
+  const r = await d.query(
     `update ref_chapters rc set scanned = true, updated_at = now()
      from unnest($1::uuid[], $2::text[]) as x(id, sha)
      where rc.id = x.id and rc.content_sha256 = x.sha`,
     [items.map((i) => i.id), items.map((i) => i.sha)],
   );
+  return r.rowCount ?? 0;
 }
 
 /** Эти главы впредь читать по одной. */
@@ -269,10 +308,11 @@ export async function mergeRefTerms(d: Db, bookId: string, proposals: RefTermPro
 }
 
 /**
- * Связать имена готового перевода с терминами глоссария: совпадает русское
- * написание (без учёта регистра) и род сущности (персонаж с персонажем или
- * титулом, место с местом…), и такое написание в глоссарии одно — иначе
- * «Тень»-прозвище съела бы подсказку «Тень»-приёма. Связанное перестаёт
+ * Связать имена готового перевода с терминами глоссария по русскому
+ * написанию (без учёта регистра). Написание в глоссарии одно — связать,
+ * какого бы рода ни были записи (модели по-разному решают, место это или
+ * организация). Терминов с таким написанием несколько («Тень» — прозвище и
+ * приём) — связать только с тем, что того же рода. Связанное перестаёт
  * быть подсказкой.
  */
 export async function linkRefTerms(d: Db, bookId: string): Promise<number> {
@@ -282,13 +322,24 @@ export async function linkRefTerms(d: Db, bookId: string): Promise<number> {
               case when kind in ('name','title') then 'person' else kind end as grp
        from terms where book_id = $1
      ),
-     single as (
+     by_spelling as (
+       select ru_l, count(*) as n, min(id::text)::uuid as id from grouped group by ru_l
+     ),
+     by_kind as (
        select ru_l, grp, min(id::text)::uuid as id from grouped group by ru_l, grp having count(*) = 1
+     ),
+     pick as (
+       select rt.id as ref_id,
+              case when s.n = 1 then s.id else k.id end as term_id
+       from ref_terms rt
+       join by_spelling s on s.ru_l = lower(rt.ru)
+       left join by_kind k on k.ru_l = lower(rt.ru)
+         and k.grp = (case when rt.kind in ('name','title') then 'person' else rt.kind end)
+       where rt.book_id = $1 and rt.term_id is null
      )
-     update ref_terms rt set term_id = s.id, updated_at = now()
-     from single s
-     where rt.book_id = $1 and rt.term_id is null and lower(rt.ru) = s.ru_l
-       and (case when rt.kind in ('name','title') then 'person' else rt.kind end) = s.grp`,
+     update ref_terms rt set term_id = p.term_id, updated_at = now()
+     from pick p
+     where rt.id = p.ref_id and p.term_id is not null`,
     [bookId],
   );
   return r.rowCount ?? 0;
