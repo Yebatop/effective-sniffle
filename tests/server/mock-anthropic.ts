@@ -7,7 +7,12 @@
  *   TRUNCATE_ME — обрыв после первого абзаца (stop_reason max_tokens).
  *   SKIP_ME — абзац пропущен, если в части больше одного абзаца.
  * - Разбор терминов (без потока, structured outputs): имена с заглавной
- *   буквы из списка KNOWN_NAMES.
+ *   буквы из списка KNOWN_NAMES. Waldo — по-русски так, как его пишет
+ *   список «ИМЕНА ИЗ ГОТОВОГО ПЕРЕВОДА», если он есть, иначе «Уолдо».
+ * - Глоссарий по готовому переводу: чтение глав — русские имена из
+ *   REF_NAMES с номерами глав (ОБОРВИ в пачке — ответ обрывается на
+ *   max_tokens); сверка — пары, где английское имя есть в английской
+ *   главе, а русское — в главе готового перевода.
  * - /v1/models/:id — для проверки ключа.
  */
 
@@ -26,6 +31,37 @@ const KNOWN_NAMES: Record<string, { ru: string; gender: "m" | "f" }> = {
   Fen: { ru: "Фен", gender: "m" },
   Oskar: { ru: "Оскар", gender: "m" },
 };
+
+/** Имена готового перевода: начальная форма, основа для поиска, английское имя. */
+const REF_NAMES: Array<{ ru: string; stem: string; en: string; kind: string; gender: "m" | "f" | null; note: string | null }> = [
+  { ru: "Мара", stem: "Мар", en: "Mara", kind: "name", gender: "f", note: "перевозчица" },
+  { ru: "Фэн", stem: "Фэн", en: "Fen", kind: "name", gender: "m", note: null },
+  { ru: "Вальдо", stem: "Вальдо", en: "Waldo", kind: "name", gender: "m", note: "старый смотритель маяка" },
+  { ru: "Туманная Переправа", stem: "Туманн", en: "Misty Crossing", kind: "place", gender: null, note: null },
+];
+
+function systemText(body: Record<string, unknown>): string {
+  const sys = body.system;
+  if (typeof sys === "string") return sys;
+  if (Array.isArray(sys)) return sys.map((b: { text?: string }) => b.text ?? "").join("\n");
+  return "";
+}
+
+function jsonReply(res: ServerResponse, model: string, json: unknown) {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(
+    JSON.stringify({
+      id: "msg_json",
+      type: "message",
+      role: "assistant",
+      model,
+      content: [{ type: "text", text: JSON.stringify(json) }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 3000, output_tokens: 200 },
+    }),
+  );
+}
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -58,13 +94,15 @@ function sse(res: ServerResponse, event: string, data: unknown) {
 }
 
 export interface MockControl {
-  /** Следующие n запросов перевода ответят ошибкой 400 (не повторяемой). */
+  /** Следующие n запросов перевода (и чтения готового перевода) ответят ошибкой. */
   failNext: number;
+  /** Код этой ошибки: 400 — запрос отклонён, 402 — оплата. */
+  failStatus: number;
 }
 
 export async function startMockAnthropic(): Promise<{ url: string; calls: MockCall[]; control: MockControl; close(): Promise<void> }> {
   const calls: MockCall[] = [];
-  const control: MockControl = { failNext: 0 };
+  const control: MockControl = { failNext: 0, failStatus: 400 };
   const server: Server = createServer(async (req, res) => {
     const path = req.url ?? "";
     if (req.method === "GET" && path.startsWith("/v1/models/")) {
@@ -83,11 +121,72 @@ export async function startMockAnthropic(): Promise<{ url: string; calls: MockCa
     calls.push({ path, model, stream, body });
     const text = userText(body);
 
+    if (!stream && systemText(body).includes("Выпиши из глав имена")) {
+      if (control.failNext > 0) {
+        control.failNext -= 1;
+        const billing = control.failStatus === 402;
+        res.writeHead(control.failStatus, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            type: "error",
+            error: billing ? { type: "billing_error", message: "mock: payment required" } : { type: "invalid_request_error", message: "mock: bad request" },
+          }),
+        );
+        return;
+      }
+      // ОБОРВИ в пачке — ответ обрывается на max_tokens (каждый раз).
+      if (text.includes("ОБОРВИ")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "msg_cut",
+            type: "message",
+            role: "assistant",
+            model,
+            content: [{ type: "text", text: '{"terms": [{"ru": "Мар' }],
+            stop_reason: "max_tokens",
+            stop_sequence: null,
+            usage: { input_tokens: 3000, output_tokens: 12000 },
+          }),
+        );
+        return;
+      }
+      // Чтение готового перевода: по разделам «ГЛАВА N».
+      const sections = [...text.matchAll(/ГЛАВА (\d+)[^\n]*\n([\s\S]*?)(?=ГЛАВА \d+|$)/g)].map((m) => ({ n: Number(m[1]), body: m[2] }));
+      const terms = REF_NAMES.map((r) => ({
+        ru: r.ru,
+        kind: r.kind,
+        gender: r.gender,
+        note: r.note,
+        chapters: sections.filter((sec) => sec.body.includes(r.stem)).map((sec) => sec.n),
+      })).filter((t) => t.chapters.length > 0);
+      jsonReply(res, model, { terms });
+      return;
+    }
+    if (!stream && systemText(body).includes("Составь словарь")) {
+      const en = text.slice(text.indexOf("ПО-АНГЛИЙСКИ"), text.indexOf("В ГОТОВОМ ПЕРЕВОДЕ"));
+      const ru = text.slice(text.indexOf("В ГОТОВОМ ПЕРЕВОДЕ"));
+      const pairs = REF_NAMES.filter((r) => en.includes(r.en) && ru.includes(r.stem)).map((r) => ({
+        en: r.en,
+        ru: r.ru,
+        kind: r.kind,
+        gender: r.gender,
+        aliases: [],
+        note: r.note,
+      }));
+      jsonReply(res, model, { pairs });
+      return;
+    }
+
     if (!stream) {
       // Разбор терминов: structured outputs, ответ — JSON в текстовом блоке.
       const terms = Object.entries(KNOWN_NAMES)
         .filter(([en]) => new RegExp(`\\b${en}\\b`).test(text))
-        .map(([en, v]) => ({ en, ru: v.ru, kind: "name", gender: v.gender, aliases: [], note: null }));
+        .map(([en, v]) => ({ en, ru: v.ru, kind: "name", gender: v.gender, aliases: [] as string[], note: null as string | null }));
+      if (/\bWaldo\b/.test(text)) {
+        const hinted = text.includes("ИМЕНА ИЗ ГОТОВОГО ПЕРЕВОДА") && text.includes("Вальдо");
+        terms.push({ en: "Waldo", ru: hinted ? "Вальдо" : "Уолдо", kind: "name", gender: "m", aliases: [], note: null });
+      }
       const addresses = terms.length >= 2 ? [{ from: terms[0].en, to: terms[1].en, form: "ty" }] : [];
       const json = { terms, addresses, narrator: { person: "third", gender: null }, register: "live" };
       res.writeHead(200, { "content-type": "application/json" });

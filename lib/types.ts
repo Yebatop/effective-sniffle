@@ -101,7 +101,11 @@ export interface Term {
   note: string | null;
   status: TermStatus;
   firstChapterId: string | null;
+  /** Откуда термин: auto — разбор главы, reference — готовый перевод. */
+  source: TermSource;
 }
+
+export type TermSource = "auto" | "reference";
 
 export interface Address {
   id: string;
@@ -331,4 +335,99 @@ export interface BookListItem {
   lastRead: { chapterId: string; chapterTitle: string; number: number | null; at: string } | null;
   nextReady: boolean;
   spentUsd: number;
+}
+
+// ── Готовый перевод и глоссарий по нему ─────────────────────────────────
+
+/** Глава чужого готового перевода, присланная кнопкой с русского сайта. */
+export interface RefChapterInput {
+  url: string | null;
+  chapterTitle: string;
+  paragraphs: string[];
+  /** Номер, который ждёт кнопка (прошлый + 1), — если в заголовке и адресе номера нет. */
+  expectedNumber?: number | null;
+  /** Ссылка «назад» со страницы: если она уже записана, номер — следующий за ней. */
+  prevUrl?: string | null;
+}
+
+/** POST /api/reference/import */
+export interface RefImportRequest {
+  bookId: string;
+  chapters: RefChapterInput[];
+}
+export interface RefImportResponse {
+  items: Array<{ number: number; created: boolean; updated: boolean }>;
+}
+
+/** 409 от /api/reference/import: под номером уже глава с другого адреса. */
+export interface RefImportConflict {
+  ok: false;
+  code: "conflict";
+  number: number;
+  message: string;
+}
+
+/** GET /api/reference/books — для выбора книги в кнопке. */
+export interface RefBookItem {
+  id: string;
+  title: string;
+  chapters: number;
+  refChapters: number;
+}
+
+/** Имя или термин готового перевода (по-русски). */
+export interface RefTerm {
+  id: string;
+  bookId: string;
+  ru: string;
+  kind: TermKind;
+  gender: Gender | null;
+  note: string | null;
+  mentions: number;
+  firstNumber: number | null;
+  lastNumber: number | null;
+  /** Сопоставленный английский термин глоссария; null — пока подсказка. */
+  termId: string | null;
+}
+
+export type GlossaryJobState = JobState | "stopped";
+export type GlossaryJobStage = "scan" | "align" | "done";
+
+export interface GlossaryJob {
+  id: string;
+  bookId: string;
+  state: GlossaryJobState;
+  stage: GlossaryJobStage;
+  model: ModelId;
+  scanDone: number;
+  scanTotal: number;
+  alignDone: number;
+  alignTotal: number;
+  alignNumbers: number[];
+  leaseUntil: string | null;
+  attempt: number;
+  retries: number;
+  reservedUsd: number;
+  reservedMonth: string | null;
+  spentUsd: number;
+  errorCode: ErrorCode | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /api/books/:id/reference — что есть из готового перевода и что с глоссарием. */
+export interface RefSummary {
+  count: number;
+  minNumber: number | null;
+  maxNumber: number | null;
+  /** Номера глав, которые есть и по-английски, и в готовом переводе (для сверки). */
+  pairs: number;
+  /** Глав, из которых имена ещё не собраны. */
+  unscanned: number;
+  hints: number;
+  matched: number;
+  /** Цена сбора глоссария сейчас, $ (оценка сверху). */
+  estimateUsd: number;
+  job: GlossaryJob | null;
 }

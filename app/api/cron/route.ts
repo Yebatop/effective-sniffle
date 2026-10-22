@@ -7,6 +7,7 @@
 import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { staleJobs } from "@/lib/db/jobs";
+import { staleGlossaryJobs } from "@/lib/db/glossary-jobs";
 import { relaySecret } from "@/lib/server/worker";
 import { fail, json, originOf, serverError } from "@/lib/server/http";
 
@@ -16,20 +17,19 @@ export async function GET(req: NextRequest) {
   try {
     const d = await db();
     const jobs = await staleJobs(d);
+    const glossaryJobs = await staleGlossaryJobs(d);
     const origin = originOf(req);
     const relay = await relaySecret(d);
+    const kick = (path: string, jobId: string) =>
+      fetch(`${origin}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-relay-secret": relay },
+        body: JSON.stringify({ jobId }),
+        signal: AbortSignal.timeout(10_000),
+      }).catch(() => undefined);
     // Каждую задачу — отдельным вызовом: одна глава занимает до 5 минут.
-    await Promise.all(
-      jobs.map((j) =>
-        fetch(`${origin}/api/jobs/run`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-relay-secret": relay },
-          body: JSON.stringify({ jobId: j.id }),
-          signal: AbortSignal.timeout(10_000),
-        }).catch(() => undefined),
-      ),
-    );
-    return json({ resumed: jobs.length });
+    await Promise.all([...jobs.map((j) => kick("/api/jobs/run", j.id)), ...glossaryJobs.map((j) => kick("/api/glossary/run", j.id))]);
+    return json({ resumed: jobs.length + glossaryJobs.length });
   } catch (e) {
     return serverError(e);
   }

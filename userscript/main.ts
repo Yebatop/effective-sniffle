@@ -14,8 +14,9 @@ import { isProbablyReaderable } from "@mozilla/readability";
 import { isChallengePage, parseRawHeaders } from "../lib/extract/challenge";
 import { decodeHtml } from "../lib/extract/charset";
 import { countWords } from "../lib/extract/clean";
-import { HIDDEN_ATTR, extractFromDocument, markHiddenByStyles, markHiddenLive } from "../lib/extract/dom";
-import type { ErrorCode, ExtractedChapter, ImportRequest, ImportResponse } from "../lib/types";
+import { HIDDEN_ATTR, extractFromDocument, findNextLink, markHiddenByStyles, markHiddenLive } from "../lib/extract/dom";
+import { bookKeyFromUrl } from "../lib/core/url";
+import type { ErrorCode, ExtractedChapter, ImportRequest, ImportResponse, RefBookItem, RefImportRequest, RefImportResponse } from "../lib/types";
 
 // Подменяются маршрутом при отдаче скрипта. Сравнивать с ними целиком нельзя:
 // подмена заменит и строку в сравнении, поэтому проверка — по префиксу.
@@ -32,6 +33,15 @@ const GROUP_MAX_CHARS = 90000;
 const LOOP_STALE_MS = 30 * 60 * 1000;
 /** Пульс работающего цикла: по нему другая вкладка понимает, что цикл жив. */
 const BEAT_MS = 2000;
+/** Обход готового перевода (страница за страницей в этой вкладке) и выбранная книга сайта. */
+const WALK_KEY = "tolmach:walk";
+const REFBOOK_KEY = "tolmach:refbook:";
+/** Сколько ждать, пока сайт дорисует главу при обходе. */
+const WALK_WAIT_MS = 20000;
+/** «До конца» — но не больше этого за один обход. */
+const WALK_MAX = 3000;
+/** Незаконченный обход старше этого не продолжаем. */
+const WALK_STALE_MS = 30 * 60 * 1000;
 /**
  * Сайты-приложения (Next.js и подобные) листают главы без перезагрузки:
  * меняют адрес и перерисовывают страницу, а менеджер скриптов второй раз
@@ -459,6 +469,586 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ── Готовый перевод: обход глав на русском сайте ────────────────────────
+//
+// Главы чужого готового перевода нужны Толмачу для глоссария и стиля.
+// Сайты переводов часто — приложения: текст главы рисуется скриптом, и
+// скачанная страница пуста. Поэтому обход идёт в этой же вкладке: снять
+// главу со страницы, отправить, перейти по «Дальше», дождаться текста —
+// и так до конца. Состояние — в хранилище менеджера (оно общее для всех
+// вкладок), а id обхода — в sessionStorage вкладки: сам продолжает только
+// тот, кто сюда перешёл, и только сразу после перехода. Другая вкладка
+// того же сайта обход не подхватывает — ей меню предлагает «Продолжить».
+
+interface WalkState {
+  v: 2;
+  /** Чей обход: id из sessionStorage вкладки, которая его ведёт. */
+  walkId: string;
+  host: string;
+  bookId: string;
+  bookTitle: string;
+  /** Сколько глав взять всего, вместе с первой; -1 — до конца. */
+  total: number;
+  done: number;
+  lastNumber: number | null;
+  /** Отпечаток последней взятой главы: на сайтах-приложениях адрес меняется раньше текста. */
+  lastSig: string | null;
+  /** Страниц без текста подряд (иллюстрации тома): их проходим по «Дальше», не беря. */
+  skipped: number;
+  seen: string[];
+  /** Когда вкладка ушла на следующую страницу. */
+  navigatedAt: number | null;
+  /**
+   * Одноразовый пропуск на продолжение: его кладёт уходящая страница (и в
+   * обход, и в sessionStorage вкладки), а забирает первая пришедшая. Копия
+   * вкладки с тем же sessionStorage опоздает — пропуска уже нет.
+   */
+  navToken: string | null;
+  startedAt: number;
+  updatedAt: number;
+  /** Пульс работающей вкладки. */
+  beat: number;
+}
+
+const WALK_TAB_KEY = "tolmach:walk-tab";
+const WALK_NAV_KEY = "tolmach:walk-nav";
+/** Новая страница должна открыться за это время после перехода — иначе обход сам не продолжается. */
+const WALK_RESUME_MS = 120000;
+/** Страниц без текста подряд, мимо которых обход проходит по «Дальше». */
+const WALK_MAX_SKIPS = 3;
+
+function tabWalkId(): string | null {
+  try {
+    return sessionStorage.getItem(WALK_TAB_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setTabWalkId(id: string | null): void {
+  try {
+    if (id) sessionStorage.setItem(WALK_TAB_KEY, id);
+    else sessionStorage.removeItem(WALK_TAB_KEY);
+  } catch {
+    // без sessionStorage обход просто не продолжится сам после перехода
+  }
+}
+
+function tabNavToken(): string | null {
+  try {
+    return sessionStorage.getItem(WALK_NAV_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setTabNavToken(token: string | null): void {
+  try {
+    if (token) sessionStorage.setItem(WALK_NAV_KEY, token);
+    else sessionStorage.removeItem(WALK_NAV_KEY);
+  } catch {
+    // без sessionStorage обход не продолжится сам после перехода
+  }
+}
+
+/** Хост без www./m. — «Дальше» на www-адрес того же сайта не теряет обход. */
+function bareHostOf(host: string): string {
+  return host.toLowerCase().replace(/^(?:www\d*|m)\./, "");
+}
+
+/** Обход хранится отдельно для каждого сайта: обход на одном не трогает другой. */
+function walkKey(): string {
+  return WALK_KEY + ":" + bareHostOf(location.host);
+}
+
+function newWalkId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+function loadWalk(): WalkState | null {
+  if (!hasGm("GM_getValue")) return null;
+  try {
+    const raw = GM_getValue<string>(walkKey(), "");
+    if (!raw) return null;
+    const s = JSON.parse(raw) as WalkState;
+    return s && s.v === 2 ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveWalk(s: WalkState | null): void {
+  if (!hasGm("GM_setValue")) return;
+  try {
+    GM_setValue(walkKey(), s ? JSON.stringify(s) : "");
+  } catch {
+    // без сохранения обход не переживёт переход
+  }
+}
+
+/** Обход в хранилище — этот (его не остановили и не забрала другая вкладка). */
+function ownsWalk(state: WalkState): boolean {
+  const cur = loadWalk();
+  return Boolean(cur && cur.walkId === state.walkId);
+}
+
+/** Незаконченный обход этого сайта, ещё не забытый. */
+function pendingWalk(): WalkState | null {
+  const s = loadWalk();
+  if (!s || s.host !== bareHostOf(location.host)) return null;
+  if (Date.now() - s.updatedAt > WALK_STALE_MS) {
+    saveWalk(null);
+    return null;
+  }
+  return s;
+}
+
+/** Обход идёт прямо сейчас в другой вкладке (свежий пульс). */
+function walkAliveElsewhere(s: WalkState): boolean {
+  return s.walkId !== tabWalkId() && Date.now() - s.beat < BEAT_MS * 5;
+}
+
+/** Книга Толмача запоминается для книги на сайте (по адресу), а если её не понять — для сайта. */
+function refBookKey(): string {
+  let key: string | null = null;
+  try {
+    key = bookKeyFromUrl(location.href);
+  } catch {
+    key = null;
+  }
+  return REFBOOK_KEY + (key || location.host);
+}
+
+function refBookFor(): { id: string; title: string } | null {
+  if (!hasGm("GM_getValue")) return null;
+  try {
+    const raw = GM_getValue<string>(refBookKey(), "");
+    const b = raw ? (JSON.parse(raw) as { id?: unknown; title?: unknown }) : null;
+    return b && typeof b.id === "string" ? { id: b.id, title: typeof b.title === "string" ? b.title : "" } : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveRefBook(book: { id: string; title: string } | null): void {
+  if (!hasGm("GM_setValue")) return;
+  try {
+    GM_setValue(refBookKey(), book ? JSON.stringify(book) : "");
+  } catch {
+    // выбор просто не запомнится
+  }
+}
+
+/** Русская страница: кириллицы в тексте больше, чем латиницы. */
+function isRussianPage(): boolean {
+  const text = ((document.body && document.body.textContent) || "").slice(0, 40000);
+  const cyr = (text.match(/[\u0400-\u04FF]/g) || []).length;
+  const lat = (text.match(/[A-Za-z]/g) || []).length;
+  return cyr > 200 && cyr > lat;
+}
+
+async function fetchRefBooks(): Promise<RefBookItem[]> {
+  const r = await gmRequest({
+    method: "GET",
+    url: APP_ORIGIN + "/api/reference/books",
+    headers: { Authorization: "Bearer " + IMPORT_TOKEN },
+    anonymous: true,
+    timeout: 20000,
+  });
+  if (r.status === 401 || r.status === 403) {
+    throw new UserError("Ключ кнопки устарел — переустановите кнопку в Толмаче (страница «Кнопка для сайтов»).", "auth");
+  }
+  if (r.status < 200 || r.status >= 300) throw new UserError("Толмач ответил ошибкой " + r.status + ". " + serverMessage(r.responseText));
+  try {
+    const j = JSON.parse(r.responseText) as { books?: RefBookItem[] };
+    return Array.isArray(j.books) ? j.books : [];
+  } catch {
+    throw new UserError("Толмач ответил что-то непонятное. Попробуйте ещё раз.");
+  }
+}
+
+/** Отправить главу готового перевода; вернёт номер, под которым она записана. */
+async function importRef(bookId: string, chapter: ExtractedChapter, expectedNumber: number | null): Promise<number> {
+  const body: RefImportRequest = {
+    bookId,
+    chapters: [{ url: chapter.url, chapterTitle: chapter.chapterTitle, paragraphs: chapter.paragraphs, expectedNumber, prevUrl: chapter.prevUrl }],
+  };
+  const r = await gmRequest({
+    method: "POST",
+    url: APP_ORIGIN + "/api/reference/import",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + IMPORT_TOKEN },
+    data: JSON.stringify(body),
+    anonymous: true,
+    timeout: 30000,
+  });
+  if (r.status === 401 || r.status === 403) {
+    throw new UserError("Ключ кнопки устарел — переустановите кнопку в Толмаче (страница «Кнопка для сайтов»).", "auth");
+  }
+  if (r.status === 404) throw new UserError("Этой книги в Толмаче больше нет — выберите книгу заново.", "unknown");
+  // Под этим номером уже другая глава: не та книга или сбилась нумерация — Толмач объяснит.
+  if (r.status === 409) throw new UserError(serverMessage(r.responseText) || "Такая глава в Толмаче уже есть с другого адреса.", "unknown");
+  if (r.status < 200 || r.status >= 300) throw new UserError("Толмач ответил ошибкой " + r.status + ". " + serverMessage(r.responseText));
+  let parsed: RefImportResponse | null = null;
+  try {
+    parsed = JSON.parse(r.responseText) as RefImportResponse;
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || !parsed.items || !parsed.items.length) throw new UserError("Толмач ответил что-то непонятное. Попробуйте ещё раз.");
+  return parsed.items[0].number;
+}
+
+function chapterSig(ch: ExtractedChapter): string {
+  const ps = ch.paragraphs;
+  return [ch.chapterTitle, ps.length, (ps[0] || "").slice(0, 80), (ps[ps.length - 1] || "").slice(0, 80)].join("|");
+}
+
+/**
+ * Дождаться текста главы на странице: два замера подряд с одним числом
+ * абзацев, и это не прошлая глава (notSig) — сайт мог сменить адрес раньше текста.
+ */
+async function waitForChapter(ms: number, notSig: string | null): Promise<ExtractedChapter | null> {
+  const until = Date.now() + ms;
+  let last = -1;
+  while (Date.now() < until && !stopRequested) {
+    if (looksLikeChapterPage()) {
+      const ch = extractCurrent();
+      if (ch.paragraphs.length > 0 && !ch.looksLikeIndex && ch.paragraphs.length === last && chapterSig(ch) !== notSig) return ch;
+      last = ch.paragraphs.length;
+    }
+    await sleep(1000);
+  }
+  return null;
+}
+
+/** Кнопка «Следующая глава» без адреса (сайты-приложения). */
+function findNextButton(): HTMLElement | null {
+  const re = /^(?:следующая(?: глава)?|далее|дальше|вперёд|вперед|next(?: chapter)?|»|›|→|>)$/i;
+  const els = document.querySelectorAll('button, [role=button], a:not([href]), a[href="#"], a[href^="javascript:"]');
+  for (let i = 0; i < els.length; i++) {
+    const el = els[i] as HTMLElement;
+    if (el.closest("[data-tolmach-ui]")) continue;
+    // «Далее» в комментариях — не следующая глава.
+    if (el.closest('[class*="comment"], [id*="comment"]')) continue;
+    if (el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") continue;
+    const label = (el.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+    if (re.test(label)) return el;
+  }
+  return null;
+}
+
+function walkLabel(s: WalkState): string {
+  return s.total > 0 ? Math.min(s.done + 1, s.total) + "/" + s.total : String(s.done + 1);
+}
+
+let walkBeat: ReturnType<typeof setInterval> | null = null;
+
+/** Пульс обхода: другая вкладка видит, что он жив, и не предлагает его продолжить. */
+function startWalkBeat(state: WalkState): void {
+  stopWalkBeat();
+  walkBeat = setInterval(() => {
+    const cur = loadWalk();
+    if (!cur || cur.walkId !== state.walkId) return;
+    state.beat = Date.now();
+    cur.beat = state.beat;
+    saveWalk(cur);
+  }, BEAT_MS);
+}
+
+function stopWalkBeat(): void {
+  if (walkBeat) clearInterval(walkBeat);
+  walkBeat = null;
+}
+
+/** Начать обход с этой страницы. total — глав всего вместе с этой (-1 — до конца). */
+async function startWalk(ui: Ui, book: { id: string; title: string }, total: number): Promise<void> {
+  if (running) return;
+  const other = pendingWalk();
+  if (other && walkAliveElsewhere(other)) {
+    ui.toast("Обход уже идёт в другой вкладке этого сайта. Остановите его там или подождите.");
+    return;
+  }
+  const now = Date.now();
+  const state: WalkState = {
+    v: 2,
+    walkId: newWalkId(),
+    host: bareHostOf(location.host),
+    bookId: book.id,
+    bookTitle: book.title,
+    total: total > 0 ? Math.min(total, WALK_MAX) : -1,
+    done: 0,
+    lastNumber: null,
+    lastSig: null,
+    skipped: 0,
+    seen: [],
+    navigatedAt: null,
+    navToken: null,
+    startedAt: now,
+    updatedAt: now,
+    beat: now,
+  };
+  setTabWalkId(state.walkId);
+  saveWalk(state);
+  stopRequested = false;
+  ui.toast("Беру готовый перевод в «" + book.title + "».");
+  await walkHere(ui, state);
+}
+
+/** Сколько видимого текста на странице (без кнопки) — отличить страницу-иллюстрацию от недогрузившейся главы. */
+function pageTextLength(): number {
+  const body = document.body;
+  if (!body) return 0;
+  return (body.innerText || body.textContent || "").replace(/\s+/g, " ").trim().length;
+}
+
+/** Шаг обхода на этой странице: снять, отправить, перейти дальше или закончить. */
+async function walkHere(ui: Ui, state: WalkState): Promise<void> {
+  running = true;
+  walkUi = ui;
+  ui.setLabel(walkLabel(state));
+  startWalkBeat(state);
+  let continuing = false;
+  try {
+    // «Дальше» привёл на уже взятую страницу (переадресация обратно) — дальше хода нет.
+    if (state.done > 0 && state.seen.indexOf(navKey(location.href)) >= 0) {
+      return finishWalk(ui, state, "«Дальше» привёл на уже взятую главу — остановился.");
+    }
+    const chapter = await waitForChapter(state.done === 0 && state.skipped === 0 ? 3000 : WALK_WAIT_MS, state.lastSig);
+    if (stopRequested || !ownsWalk(state)) return finishWalk(ui, state, "Остановлено.");
+    if (!chapter) {
+      // Страница почти без текста (иллюстрации тома, объявление) — пройти
+      // мимо по «Дальше». Страница с текстом, который не сложился в главу, —
+      // это недогрузившаяся глава: остановиться, а не потерять её.
+      const textless = pageTextLength() < 2000;
+      const skipTo = textless && state.done > 0 && state.skipped < WALK_MAX_SKIPS ? findNextLink(document, location.href) : null;
+      if (!skipTo || state.seen.indexOf(navKey(skipTo)) >= 0) {
+        return finishWalk(ui, state, "Глава не загрузилась — остановился. Возможно, сайт просит войти или пройти проверку.");
+      }
+      state.skipped += 1;
+      state.seen.push(navKey(location.href));
+      continuing = await goNext(ui, state, skipTo);
+      return;
+    }
+    const number = await importRef(state.bookId, chapter, state.lastNumber !== null ? state.lastNumber + 1 : null);
+    state.done += 1;
+    state.lastNumber = number;
+    state.lastSig = chapterSig(chapter);
+    state.skipped = 0;
+    state.seen.push(navKey(location.href));
+    if (state.seen.length > 50) state.seen = state.seen.slice(-50);
+    state.updatedAt = Date.now();
+    const limit = state.total > 0 ? state.total : WALK_MAX;
+    if (state.done >= limit) return finishWalk(ui, state, "");
+    const next = chapter.nextUrl;
+    if (!next && !findNextButton()) return finishWalk(ui, state, "Ссылки на следующую главу нет — это, похоже, последняя.");
+    if (next && state.seen.indexOf(navKey(next)) >= 0) return finishWalk(ui, state, "«Дальше» ведёт по кругу — остановился.");
+    continuing = await goNext(ui, state, next);
+  } catch (e) {
+    if (ownsWalk(state)) saveWalk(null);
+    setTabWalkId(null);
+    ui.toast("Остановился на главе " + (state.done + 1) + ": " + errorText(e));
+  } finally {
+    if (!continuing) {
+      stopWalkBeat();
+      running = false;
+      ui.setLabel(null);
+    }
+  }
+}
+
+/**
+ * Пауза и переход к следующей главе: по адресу (перезагрузка — продолжит
+ * эта же вкладка) или нажатием кнопки «Далее» (продолжение в этом же
+ * документе). true — обход продолжается.
+ */
+async function goNext(ui: Ui, state: WalkState, next: string | null): Promise<boolean> {
+  // Обход могли остановить или забрать в другую вкладку, пока шла отправка, — не затирать.
+  if (stopRequested || !ownsWalk(state)) {
+    finishWalk(ui, state, "Остановлено.");
+    return false;
+  }
+  saveWalk(state);
+  ui.setLabel(walkLabel(state));
+  // Пауза 3–5 с: не долбить чужой сайт.
+  await sleep(3000 + Math.floor(Math.random() * 2000));
+  if (stopRequested || !ownsWalk(state)) {
+    finishWalk(ui, state, "Остановлено.");
+    return false;
+  }
+  if (next) {
+    let sameSite = false;
+    try {
+      sameSite = new URL(next, location.href).origin === location.origin;
+    } catch {
+      sameSite = false;
+    }
+    if (!sameSite) {
+      // В другую вкладку браузера память вкладки не переедет — честно сказать.
+      finishWalk(ui, state, "Следующая глава — на другом адресе сайта. Откройте её и нажмите «Т» → «Продолжить обход».");
+      return false;
+    }
+    const token = newWalkId();
+    state.navigatedAt = Date.now();
+    state.navToken = token;
+    setTabNavToken(token);
+    saveWalk(state);
+    location.assign(next);
+    return true;
+  }
+  const button = findNextButton();
+  if (!button) {
+    finishWalk(ui, state, "Ссылки на следующую главу нет — это, похоже, последняя.");
+    return false;
+  }
+  const before = navKey(location.href);
+  button.click();
+  const until = Date.now() + 15000;
+  // «#» в ссылке «Далее» меняет адрес сразу — ждём смены самой страницы.
+  while (navKey(location.href) === before && Date.now() < until && !stopRequested) await sleep(300);
+  if (stopRequested || !ownsWalk(state)) {
+    finishWalk(ui, state, "Остановлено.");
+    return false;
+  }
+  if (navKey(location.href) === before) {
+    finishWalk(ui, state, "Кнопка «Далее» не открыла следующую главу — остановился.");
+    return false;
+  }
+  if (state.seen.indexOf(navKey(location.href)) >= 0) {
+    finishWalk(ui, state, "«Дальше» ведёт по кругу — остановился.");
+    return false;
+  }
+  // Та же страница, новый адрес: продолжаем здесь же, без перезагрузки.
+  running = false;
+  void walkHere(ui, state);
+  return true;
+}
+
+function finishWalk(ui: Ui, state: WalkState, note: string): void {
+  if (ownsWalk(state)) saveWalk(null);
+  setTabWalkId(null);
+  setTabNavToken(null);
+  const got =
+    state.done > 0
+      ? "В «" + state.bookTitle + "» глав готового перевода: +" + state.done + (state.lastNumber !== null ? " (до главы " + state.lastNumber + ")" : "") + "."
+      : "";
+  ui.toast([note, got, got ? "Глоссарий собирается на странице книги в Толмаче." : ""].filter(Boolean).join(" "));
+}
+
+/**
+ * Сам продолжает только та вкладка, что сюда перешла, сразу после
+ * перехода и с неиспользованным пропуском.
+ */
+function canResumeHere(s: WalkState): boolean {
+  return (
+    s.walkId === tabWalkId() &&
+    s.navToken !== null &&
+    s.navToken === tabNavToken() &&
+    s.navigatedAt !== null &&
+    Date.now() - s.navigatedAt < WALK_RESUME_MS
+  );
+}
+
+/** Обход с прошлой страницы этой вкладки — продолжить здесь (пропуск забирается сразу). */
+function resumeWalk(ui: Ui): boolean {
+  const s = pendingWalk();
+  if (!s || !canResumeHere(s)) return false;
+  s.navigatedAt = null;
+  s.navToken = null;
+  s.beat = Date.now();
+  saveWalk(s);
+  setTabNavToken(null);
+  stopRequested = false;
+  void walkHere(ui, s);
+  return true;
+}
+
+/**
+ * «Продолжить обход» из меню: забрать незаконченный обход в эту вкладку и
+ * начать с этой страницы. Обход перечитывается (меню могло висеть открытым)
+ * и получает новый id — прежняя вкладка, если вдруг оживёт, остановится.
+ */
+async function adoptWalk(ui: Ui, walkId: string): Promise<void> {
+  if (running) return;
+  const cur = pendingWalk();
+  if (!cur || cur.walkId !== walkId) {
+    ui.toast("Этот обход уже закончен или забыт.");
+    return;
+  }
+  if (walkAliveElsewhere(cur)) {
+    ui.toast("Обход идёт в другой вкладке этого сайта. Остановите его там или подождите.");
+    return;
+  }
+  cur.walkId = newWalkId();
+  setTabWalkId(cur.walkId);
+  setTabNavToken(null);
+  // С новой страницы номер — по ней самой и по её ссылке «назад», а не по счёту обхода.
+  if (cur.total > 0) cur.total = Math.max(1, cur.total - cur.done);
+  cur.done = 0;
+  cur.lastNumber = null;
+  cur.lastSig = null;
+  cur.seen = [];
+  cur.skipped = 0;
+  cur.navigatedAt = null;
+  cur.navToken = null;
+  cur.beat = Date.now();
+  cur.updatedAt = Date.now();
+  saveWalk(cur);
+  stopRequested = false;
+  ui.toast("Продолжаю обход «" + cur.bookTitle + "» с этой страницы.");
+  await walkHere(ui, cur);
+}
+
+/**
+ * Выбрать книгу Толмача (список — из Толмача). Запомненная для этой книги
+ * сайта — первой: обход всегда начинается с явного выбора, чтобы главы не
+ * ушли в другую книгу.
+ */
+async function pickRefBook(ui: Ui): Promise<{ id: string; title: string } | null> {
+  ui.toast("Загружаю книги из Толмача…");
+  let books: RefBookItem[];
+  try {
+    books = await fetchRefBooks();
+  } catch (e) {
+    ui.toast(errorText(e));
+    return null;
+  }
+  if (books.length === 0) {
+    ui.toast("В Толмаче пока нет книг. Сначала добавьте английскую главу этой книги кнопкой «Т» на сайте с оригиналом.");
+    return null;
+  }
+  const remembered = refBookFor();
+  const ordered = remembered ? books.filter((b) => b.id === remembered.id).concat(books.filter((b) => b.id !== remembered.id)) : books;
+  const picked = await ui.choose(
+    "Чей это перевод? Книга в Толмаче:",
+    ordered.map((b) => ({
+      label: (remembered && b.id === remembered.id ? "✓ " : "") + b.title + (b.refChapters ? " · готовых глав: " + b.refChapters : ""),
+      value: b.id,
+    })),
+  );
+  if (!picked) return null;
+  const book = books.filter((b) => b.id === picked)[0];
+  const chosen = { id: book.id, title: book.title };
+  saveRefBook(chosen);
+  return chosen;
+}
+
+async function walkWithBook(ui: Ui, total: number): Promise<void> {
+  const book = await pickRefBook(ui);
+  if (book) await startWalk(ui, book, total);
+}
+
+/** Кнопка, которой принадлежит идущий обход (для возврата страницы из кэша «Назад»). */
+let walkUi: Ui | null = null;
+
+// Страница ушла в кэш «Назад»/«Вперёд» посреди обхода — пульс не должен
+// жить в замороженной копии; вернулась из кэша — это уже не страница обхода.
+window.addEventListener("pagehide", () => stopWalkBeat());
+window.addEventListener("pageshow", (ev: PageTransitionEvent) => {
+  if (!ev.persisted || !running || !walkUi) return;
+  running = false;
+  walkUi.setLabel(null);
+});
+
 // ── Кнопка и меню ───────────────────────────────────────────────────────
 
 interface Ui {
@@ -468,6 +1058,8 @@ interface Ui {
   /** Кнопка всё ещё на странице: сайт при перерисовке мог её выкинуть. */
   attached(): boolean;
   reattach(): void;
+  /** Показать выбор в меню; null — «Отмена». */
+  choose(title: string, options: Array<{ label: string; value: string }>): Promise<string | null>;
 }
 
 const CSS = `
@@ -478,12 +1070,14 @@ const CSS = `
   box-shadow: 0 4px 14px rgba(0,0,0,.35); cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .btn.small { font-size: 14px; }
 .menu { position: absolute; right: 0; bottom: 64px; width: 250px; max-width: 86vw; background: #fff; color: #1b1b1b;
-  border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.3); padding: 6px 0; display: none; }
+  border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.3); padding: 6px 0; display: none;
+  max-height: calc(100vh - 190px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .menu.open { display: block; }
 .item { display: block; width: 100%; box-sizing: border-box; text-align: left; padding: 13px 16px; margin: 0;
   background: none; border: 0; font-size: 16px; line-height: 1.3; color: inherit; font-family: inherit; cursor: pointer; }
 .item:active, .item:hover { background: #e8f0f2; }
 .item.muted { color: #666; }
+.head { padding: 10px 16px 6px; font-size: 13px; color: #666; line-height: 1.3; }
 .toast { position: absolute; right: 0; bottom: 64px; width: 290px; max-width: 86vw; box-sizing: border-box;
   background: #222; color: #fff; padding: 12px 14px; border-radius: 10px; font-size: 15px; line-height: 1.35;
   box-shadow: 0 6px 24px rgba(0,0,0,.3); display: none; }
@@ -559,6 +1153,19 @@ function createUi(onClose: () => void): Ui {
     reattach() {
       if (!host.isConnected) mount();
     },
+    choose(title, options) {
+      return new Promise((resolve) => {
+        while (menu.firstChild) menu.removeChild(menu.firstChild);
+        toastEl.className = "toast";
+        const head = document.createElement("div");
+        head.className = "head";
+        head.textContent = title;
+        menu.appendChild(head);
+        for (const o of options) item(o.label, () => resolve(o.value));
+        item("Отмена", () => resolve(null), true);
+        menu.className = "menu open";
+      });
+    },
   };
   toastEl.addEventListener("click", () => {
     toastEl.className = "toast";
@@ -581,8 +1188,28 @@ function createUi(onClose: () => void): Ui {
     if (running) {
       item("Остановить", () => {
         stopRequested = true;
+        const walk = loadWalk();
+        if (walk && walk.walkId === tabWalkId()) saveWalk(null);
         ui.toast("Останавливаюсь — отправлю то, что уже взял.");
       });
+    } else if (isRussianPage()) {
+      const pending = pendingWalk();
+      if (pending && walkAliveElsewhere(pending)) {
+        item("Обход «" + pending.bookTitle + "» идёт в другой вкладке", () => ui.toast("Остановите его там или подождите, пока закончится."), true);
+      } else if (pending && !canResumeHere(pending)) {
+        const id = pending.walkId;
+        item("Продолжить обход «" + pending.bookTitle + "» с этой страницы", () => void adoptWalk(ui, id));
+        item("Забыть незаконченный обход", () => {
+          const cur = pendingWalk();
+          if (cur && cur.walkId === id && !walkAliveElsewhere(cur)) saveWalk(null);
+          ui.toast("Обход забыт.");
+        }, true);
+      }
+      item("Готовый перевод: взять эту главу", () => void walkWithBook(ui, 1));
+      item("Готовый перевод: эту и следующие 10", () => void walkWithBook(ui, 11));
+      item("Готовый перевод: эту и следующие 50", () => void walkWithBook(ui, 51));
+      item("Готовый перевод: эту и все следующие", () => void walkWithBook(ui, -1));
+      item("Закрыть", onClose, true);
     } else {
       item("Перевести эту главу", () => void translateThis(ui));
       item("Взять эту и следующие 3", () => void startLoop(ui, 3));
@@ -709,6 +1336,12 @@ function startButton(): void {
     }
   }
 
+  const walk = pendingWalk();
+  if (walk && canResumeHere(walk)) {
+    forced = true;
+    resumeWalk(show());
+    return;
+  }
   const pending = loadLoop();
   if (pending && pending.host === location.host) {
     maybeResume(show());

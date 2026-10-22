@@ -7,7 +7,7 @@
  * текст целиком к базе с версией ниже текущей.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 -- Схема «Толмача». Версия схемы — в schema_meta; migrate.ts применяет файл
@@ -220,4 +220,88 @@ create table if not exists login_attempts (
   created_at timestamptz not null default now()
 );
 create index if not exists login_attempts_ip on login_attempts(ip, created_at);
+
+-- ── Версия 2: готовый перевод книги и глоссарий по нему ──────────────────
+
+-- Главы чужого готового перевода на русский (их собирает кнопка «Т» на
+-- русском сайте). Нужны для глоссария и как образец стиля перед первой
+-- своей главой; в читалке не показываются.
+create table if not exists ref_chapters (
+  id uuid primary key default gen_random_uuid(),
+  book_id uuid not null references books(id) on delete cascade,
+  number int not null,
+  title text not null default '',
+  paragraphs text[] not null,
+  words int not null default 0,
+  url text,
+  -- Адреса частей: глава на сайте бывает разбита («Глава 5.1», «5.2») —
+  -- части складываются в одну главу по порядку.
+  urls text[] not null default '{}',
+  content_sha256 text not null,
+  -- Имена из главы уже собраны в ref_terms.
+  scanned boolean not null default false,
+  -- Вместе с соседями глава не читается (ответ обрывался) — только одна.
+  scan_alone boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (book_id, number)
+);
+
+-- Имена и термины готового перевода (по-русски). term_id — сопоставленный
+-- английский термин глоссария; пока его нет, имя служит подсказкой при
+-- разборе новых глав.
+create table if not exists ref_terms (
+  id uuid primary key default gen_random_uuid(),
+  book_id uuid not null references books(id) on delete cascade,
+  ru text not null,
+  kind text not null default 'other' check (kind in ('name','title','technique','place','org','item','other')),
+  gender text check (gender in ('m','f','n','unknown')),
+  note text,
+  mentions int not null default 0,
+  first_number int,
+  last_number int,
+  term_id uuid references terms(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create unique index if not exists ref_terms_book_ru on ref_terms(book_id, lower(ru));
+
+-- Откуда термин: auto — разбор главы, reference — готовый перевод.
+alter table terms add column if not exists source text not null default 'auto';
+
+-- Сбор глоссария по готовому переводу: фоновая задача с арендой и эстафетой,
+-- как перевод главы. Этапы: scan — имена из русских глав; align — сверка
+-- с английскими главами тех же номеров.
+create table if not exists glossary_jobs (
+  id uuid primary key default gen_random_uuid(),
+  book_id uuid not null references books(id) on delete cascade,
+  state text not null default 'queued'
+    check (state in ('queued','running','done','failed','blocked_budget','blocked_credit','stopped')),
+  stage text not null default 'scan' check (stage in ('scan','align','done')),
+  model text not null,
+  scan_done int not null default 0,
+  scan_total int not null default 0,
+  align_done int not null default 0,
+  align_total int not null default 0,
+  -- Номера глав для сверки, замороженные при переходе к ней: список не
+  -- съезжает, если глав добавилось, пока шёл сбор.
+  align_numbers int[] not null default '{}',
+  lease_until timestamptz,
+  attempt int not null default 0,
+  retries int not null default 0,
+  reserved_usd numeric(12,6) not null default 0,
+  reserved_month text,
+  spent_usd numeric(12,6) not null default 0,
+  error_code text,
+  error_message text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create unique index if not exists glossary_jobs_live on glossary_jobs(book_id)
+  where state in ('queued','running','blocked_budget','blocked_credit');
+
+-- ── Версия 3: столбцы, которых не было в первой выкладке версии 2 ──────
+alter table ref_chapters add column if not exists urls text[] not null default '{}';
+alter table ref_chapters add column if not exists scan_alone boolean not null default false;
+alter table glossary_jobs add column if not exists align_numbers int[] not null default '{}';
 `;

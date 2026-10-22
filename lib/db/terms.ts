@@ -124,6 +124,80 @@ export async function mergeProposals(
   return { addedTerms, addedAddresses, glossaryVersion: version };
 }
 
+/**
+ * Слить пары из готового перевода. Готовый перевод главнее разбора: у
+ * термина, который предложила модель (auto, не проверен человеком), русское
+ * написание меняется на то, что в готовом переводе. Проверенное человеком
+ * не трогается никогда. Новые термины — со source = reference.
+ */
+export async function mergeReferenceTerms(
+  d: Db,
+  bookId: string,
+  chapterId: string | null,
+  terms: ProposedTerm[],
+): Promise<{ added: number; updated: number }> {
+  const existing = await listTerms(d, bookId);
+  const byName = new Map<string, Term>();
+  const index = (t: Term) => {
+    byName.set(low(t.en), t);
+    for (const a of t.aliases) if (!byName.has(low(a))) byName.set(low(a), t);
+  };
+  existing.forEach(index);
+
+  let added = 0;
+  let updated = 0;
+  const seen = new Set<string>();
+  for (const p of terms) {
+    const en = tidy(p.en);
+    const ru = tidy(p.ru);
+    if (!en || !ru || seen.has(low(en))) continue;
+    seen.add(low(en));
+    const kind = KINDS.includes(p.kind) ? p.kind : "other";
+    const gender = kind === "name" && p.gender && GENDERS.includes(p.gender) ? p.gender : null;
+    const aliases = Array.from(new Set((p.aliases ?? []).map(tidy).filter((a) => a && low(a) !== low(en))));
+    const note = tidy(p.note) || null;
+
+    const known = byName.get(low(en));
+    if (known) {
+      if (known.status === "checked") continue;
+      const have = new Set([low(known.en), ...known.aliases.map(low)]);
+      const newAliases = aliases.filter((a) => !have.has(low(a)) && !byName.has(low(a)));
+      // Совпало лишь другое имя (alias: «Max» у «Maximilian») — его русская
+      // форма не годится для основного написания термина.
+      const byMainName = low(known.en) === low(en);
+      const newRu = byMainName && known.source === "auto" && low(known.ru) !== low(ru) ? ru : null;
+      // «unknown» — тоже пусто: готовый перевод род знает лучше.
+      const fillGender = known.kind === "name" && (!known.gender || known.gender === "unknown") && gender && gender !== "unknown" ? gender : null;
+      const fillNote = !known.note && note ? note : null;
+      if (!newRu && newAliases.length === 0 && !fillGender && !fillNote) continue;
+      const r = await d.query(
+        `update terms set ru = coalesce($2, ru), source = case when $2::text is not null then 'reference' else source end,
+           aliases = aliases || $3::text[], gender = coalesce($4, gender), note = coalesce(note, $5), updated_at = now()
+         where id = $1 and status <> 'checked' returning *`,
+        [known.id, newRu, newAliases, fillGender, fillNote],
+      );
+      if (r.rows[0]) {
+        updated += 1;
+        index(toTerm(r.rows[0]));
+      }
+      continue;
+    }
+    const r = await d.query(
+      `insert into terms (book_id, en, ru, kind, gender, aliases, note, first_chapter_id, source)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 'reference')
+       on conflict (book_id, lower(en)) do nothing
+       returning *`,
+      [bookId, en, ru, kind, gender, aliases, note, chapterId],
+    );
+    if (r.rows[0]) {
+      added += 1;
+      index(toTerm(r.rows[0]));
+    }
+  }
+  if (added + updated > 0) await bumpVersion(d, bookId);
+  return { added, updated };
+}
+
 async function bumpVersion(d: Db, bookId: string): Promise<number> {
   const r = await d.query(
     "update books set glossary_version = glossary_version + 1, updated_at = now() where id = $1 returning glossary_version",

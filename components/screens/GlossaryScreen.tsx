@@ -25,7 +25,7 @@ export default function GlossaryScreen({ bookId }: { bookId: string }) {
     setError(null);
     api
       .glossary(bookId)
-      .then((d) => alive && setData({ terms: d.terms ?? [], addresses: d.addresses ?? [] }))
+      .then((d) => alive && setData({ terms: d.terms ?? [], addresses: d.addresses ?? [], refTerms: d.refTerms ?? [] }))
       .catch((e) => alive && setError(errorText(e)));
     return () => {
       alive = false;
@@ -43,6 +43,7 @@ export default function GlossaryScreen({ bookId }: { bookId: string }) {
   }, [data]);
 
   const groups = useMemo(() => (data ? groupTerms(data.terms) : []), [data]);
+  const hints = useMemo(() => (data?.refTerms ?? []).filter((r) => r.termId === null), [data]);
   const termById = useMemo(() => {
     const m = new Map<string, Term>();
     for (const t of data?.terms ?? []) m.set(t.id, t);
@@ -56,8 +57,11 @@ export default function GlossaryScreen({ bookId }: { bookId: string }) {
     setData((d) =>
       d
         ? {
+            ...d,
             terms: d.terms.filter((x) => x.id !== id),
             addresses: d.addresses.filter((a) => a.fromTermId !== id && a.toTermId !== id),
+            // Имя готового перевода, связанное с удалённым термином, снова подсказка.
+            refTerms: (d.refTerms ?? []).map((r) => (r.termId === id ? { ...r, termId: null } : r)),
           }
         : d,
     );
@@ -83,7 +87,7 @@ export default function GlossaryScreen({ bookId }: { bookId: string }) {
       {error && <ErrorNote text={error} onRetry={() => setReload((n) => n + 1)} />}
       {!data && !error && <Loading />}
 
-      {data && data.terms.length === 0 && (
+      {data && data.terms.length === 0 && (data.refTerms ?? []).length === 0 && (
         <div className="notice">
           <p>Пока пусто. Глоссарий появится после перевода первой главы.</p>
         </div>
@@ -109,6 +113,29 @@ export default function GlossaryScreen({ bookId }: { bookId: string }) {
               </div>
             </section>
           ))}
+
+          {hints.length > 0 && (
+            <section aria-labelledby="hints-head" className="stack-sm">
+              <h2 id="hints-head" className="label">
+                Из готового перевода, ещё не встречались по-английски <span className="dim">· {hints.length}</span>
+              </h2>
+              <p className="hint">
+                Когда такое имя появится в новой главе, Толмач возьмёт это написание и перенесёт его в глоссарий.
+              </p>
+              <details className="term-more">
+                <summary>Показать</summary>
+                <ul className="stack-sm" style={{ listStyle: "none", padding: 0, margin: "8px 0 0" }}>
+                  {hints.map((h) => (
+                    <li key={h.id} className="small">
+                      <strong>{h.ru}</strong>
+                      {h.note ? <span className="muted"> — {h.note}</span> : null}
+                      {h.lastNumber !== null ? <span className="dim"> · до гл. {h.lastNumber}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            </section>
+          )}
 
           {data.addresses.length > 0 && (
             <section aria-labelledby="addr-head" className="stack-sm">
@@ -238,6 +265,7 @@ function TermRow({
             <span className="chip chip-checked">проверено</span>
           )}
         </div>
+        {term.source === "reference" && <span className="small muted">из готового перевода</span>}
       </div>
 
       {term.kind === "name" && (

@@ -4,7 +4,7 @@
  * lib/types.ts.
  */
 
-import type { Address, Book, Chapter, ChapterSource, Effort, ErrorCode, Gender, Job, JobState, ModelId, Register, Term, TermKind, TermStatus, Translation, TranslationStatus } from "../types";
+import type { Address, Book, Chapter, ChapterSource, Effort, ErrorCode, Gender, GlossaryJob, GlossaryJobStage, GlossaryJobState, Job, JobState, ModelId, RefTerm, Register, Term, TermKind, TermSource, TermStatus, Translation, TranslationStatus } from "../types";
 
 type Row = Record<string, unknown>;
 
@@ -96,6 +96,47 @@ export function toTerm(r: Row): Term {
     note: strOrNull(r.note),
     status: str(r.status) as TermStatus,
     firstChapterId: strOrNull(r.first_chapter_id),
+    source: (str(r.source) || "auto") as TermSource,
+  };
+}
+
+export function toRefTerm(r: Row): RefTerm {
+  return {
+    id: str(r.id),
+    bookId: str(r.book_id),
+    ru: str(r.ru),
+    kind: str(r.kind) as TermKind,
+    gender: (strOrNull(r.gender) as Gender | null) ?? null,
+    note: strOrNull(r.note),
+    mentions: num(r.mentions),
+    firstNumber: numOrNull(r.first_number),
+    lastNumber: numOrNull(r.last_number),
+    termId: strOrNull(r.term_id),
+  };
+}
+
+export function toGlossaryJob(r: Row): GlossaryJob {
+  return {
+    id: str(r.id),
+    bookId: str(r.book_id),
+    state: str(r.state) as GlossaryJobState,
+    stage: str(r.stage) as GlossaryJobStage,
+    model: str(r.model) as ModelId,
+    scanDone: num(r.scan_done),
+    scanTotal: num(r.scan_total),
+    alignDone: num(r.align_done),
+    alignTotal: num(r.align_total),
+    alignNumbers: Array.isArray(r.align_numbers) ? (r.align_numbers as unknown[]).map(num) : [],
+    leaseUntil: isoOrNull(r.lease_until),
+    attempt: num(r.attempt),
+    retries: num(r.retries),
+    reservedUsd: num(r.reserved_usd),
+    reservedMonth: r.reserved_month == null ? null : String(r.reserved_month),
+    spentUsd: num(r.spent_usd),
+    errorCode: (strOrNull(r.error_code) as ErrorCode | null) ?? null,
+    errorMessage: strOrNull(r.error_message),
+    createdAt: iso(r.created_at),
+    updatedAt: iso(r.updated_at),
   };
 }
 

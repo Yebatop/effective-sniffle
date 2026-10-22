@@ -92,7 +92,7 @@ describe("глоссарий", () => {
 
   it("разделы в постоянном порядке", () => {
     const term = (id: string, kind: Term["kind"], en: string): Term => ({
-      id, bookId: "b", en, ru: en, kind, gender: null, aliases: [], note: null, status: "proposed", firstChapterId: null,
+      id, bookId: "b", en, ru: en, kind, gender: null, aliases: [], note: null, status: "proposed", firstChapterId: null, source: "auto",
     });
     const g = groupTerms([term("1", "place", "Zed"), term("2", "name", "bob"), term("3", "name", "Alice"), term("4", "item", "Sword")]);
     expect(g.map((x) => x.label)).toEqual(["Имена", "Места", "Предметы"]);

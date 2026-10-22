@@ -99,6 +99,53 @@ export const EXTRACT_FIXED_INPUT_TOKENS = 2500;
 /** В среднем по книге: в первых главах терминов много, потом единицы. */
 export const EXTRACT_OUTPUT_TOKENS = 600;
 
+// ── Глоссарий по готовому переводу ──
+/** Токенов на русское слово (≈ 7 символов на слово / 2,6). */
+export const RU_TOKENS_PER_RU_WORD = 2.7;
+/** Правила чтения имён и заголовки — на каждый вызов. */
+export const GLOSSARY_FIXED_INPUT_TOKENS = 1500;
+/** Имена из пачки глав: в среднем несколько десятков коротких строк. */
+export const GLOSSARY_SCAN_OUTPUT_TOKENS = 900;
+/** Пары «английское → русское» из одной главы и известные пары во входе. */
+export const GLOSSARY_ALIGN_OUTPUT_TOKENS = 1200;
+export const GLOSSARY_ALIGN_KNOWN_TOKENS = 1500;
+
+/**
+ * Цена сбора глоссария: чтение русских глав пачками (scanCalls вызовов на
+ * scanWords слов) и сверка пар глав (по-английски alignEnWords, по-русски
+ * alignRuWords, alignPairs вызовов).
+ */
+export function estimateGlossaryUsd(
+  model: ModelId,
+  p: { scanWords: number; scanCalls: number; alignEnWords: number; alignRuWords: number; alignPairs: number },
+): number {
+  const zero = { cacheWrite5mTokens: 0, cacheWrite1hTokens: 0, cacheReadTokens: 0 };
+  // Считать по одному среднему вызову и умножать: наценку за длинный вход
+  // (у Haiku — выше 100K токенов) берут с каждого вызова, а не с суммы.
+  const scan =
+    p.scanCalls > 0
+      ? p.scanCalls *
+        usageCostUsd(model, {
+          inputTokens: (p.scanWords * RU_TOKENS_PER_RU_WORD) / p.scanCalls + GLOSSARY_FIXED_INPUT_TOKENS,
+          outputTokens: GLOSSARY_SCAN_OUTPUT_TOKENS,
+          ...zero,
+        })
+      : 0;
+  const align =
+    p.alignPairs > 0
+      ? p.alignPairs *
+        usageCostUsd(model, {
+          inputTokens:
+            (p.alignEnWords * EN_TOKENS_PER_WORD + p.alignRuWords * RU_TOKENS_PER_RU_WORD) / p.alignPairs +
+            GLOSSARY_FIXED_INPUT_TOKENS +
+            GLOSSARY_ALIGN_KNOWN_TOKENS,
+          outputTokens: GLOSSARY_ALIGN_OUTPUT_TOKENS,
+          ...zero,
+        })
+      : 0;
+  return scan + align;
+}
+
 export function estimateExtractionUsd(model: ModelId, words: number): number {
   if (!(words > 0)) return 0;
   return usageCostUsd(model, {

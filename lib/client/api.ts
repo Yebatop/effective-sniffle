@@ -23,6 +23,9 @@ import type {
   ImportResponse,
   JobPoll,
   PositionRequest,
+  RefSummary,
+  RefTerm,
+  GlossaryJob,
   ReportRequest,
   ReportResponse,
   Settings,
@@ -51,6 +54,8 @@ export type BookPatch = Partial<Pick<Book, "title" | "register" | "narratorPerso
 export interface GlossaryView {
   terms: Term[];
   addresses: Address[];
+  /** Имена готового перевода (по-русски); у несопоставленных termId = null. */
+  refTerms?: RefTerm[];
 }
 
 export type TermPatch = Partial<Pick<Term, "ru" | "kind" | "gender" | "aliases" | "note" | "status">>;
@@ -265,6 +270,11 @@ export function createApi(partial: Partial<ApiDeps> = {}) {
     deleteTerm: (termId: string) => request<{ ok: boolean }>("DELETE", `/api/terms/${id(termId)}`),
     patchAddress: (addressId: string, form: "ty" | "vy") =>
       request<{ ok: boolean }>("PATCH", `/api/addresses/${id(addressId)}`, { form }),
+    reference: (bookId: string) => request<RefSummary>("GET", `/api/books/${id(bookId)}/reference`),
+    deleteReference: (bookId: string) => request<{ ok: boolean }>("DELETE", `/api/books/${id(bookId)}/reference`),
+    startGlossary: (bookId: string) =>
+      request<{ job: GlossaryJob; created: boolean }>("POST", `/api/books/${id(bookId)}/reference/glossary`, {}),
+    stopGlossary: (bookId: string) => request<{ stopped: boolean }>("DELETE", `/api/books/${id(bookId)}/reference/glossary`),
 
     importChapters: (req: ImportRequest) => request<ImportResponse>("POST", "/api/import", req),
     fetchUrl: (url: string) => request<FetchResponse>("POST", "/api/fetch", { url }, { allowOkFalse: true }),
