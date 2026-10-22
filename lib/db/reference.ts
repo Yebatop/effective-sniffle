@@ -1,7 +1,8 @@
 /**
  * Готовый перевод книги: главы чужого русского перевода (ref_chapters) и
  * имена из них (ref_terms). Главы нужны для глоссария и как образец стиля
- * перед первой своей главой; в читалке их нет.
+ * перед первой своей главой, а ещё читаются в Толмаче как главы книги
+ * (/book/:id/ready/:number).
  */
 
 import type { Db } from "./client";
@@ -203,6 +204,36 @@ export async function refNumberByUrl(d: Db, bookId: string, url: string): Promis
     [bookId, url],
   );
   return r.rows[0] ? Number(r.rows[0].number) : null;
+}
+
+/** Главы готового перевода книги без текста — для оглавления. */
+export async function listRefHeads(d: Db, bookId: string): Promise<Array<{ number: number; title: string; words: number }>> {
+  const r = await d.query("select number, title, words from ref_chapters where book_id = $1 order by number", [bookId]);
+  return r.rows.map((row) => ({ number: Number(row.number), title: String(row.title ?? ""), words: Number(row.words ?? 0) }));
+}
+
+/** Номера глав готового перевода книги. */
+export async function refNumbers(d: Db, bookId: string): Promise<Set<number>> {
+  const r = await d.query("select number from ref_chapters where book_id = $1", [bookId]);
+  return new Set(r.rows.map((row) => Number(row.number)));
+}
+
+/** Глава готового перевода для чтения. */
+export async function getRefChapterByNumber(
+  d: Db,
+  bookId: string,
+  number: number,
+): Promise<{ number: number; title: string; paragraphs: string[]; words: number; url: string | null } | null> {
+  const r = await d.query("select number, title, paragraphs, words, url from ref_chapters where book_id = $1 and number = $2", [bookId, number]);
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    number: Number(row.number),
+    title: String(row.title ?? ""),
+    paragraphs: Array.isArray(row.paragraphs) ? (row.paragraphs as unknown[]).map(String) : [],
+    words: Number(row.words ?? 0),
+    url: row.url == null ? null : String(row.url),
+  };
 }
 
 /** Заголовок главы готового перевода с этим номером (или null). */

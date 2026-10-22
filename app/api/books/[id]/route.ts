@@ -1,6 +1,7 @@
 import { type NextRequest } from "next/server";
 import { db } from "@/lib/db/client";
 import { bookSpentUsd, getBook, listChapters, updateBook } from "@/lib/db/books";
+import { listRefHeads } from "@/lib/db/reference";
 import { fail, json, readJson, serverError } from "@/lib/server/http";
 import type { Gender, Register } from "@/lib/types";
 
@@ -12,8 +13,8 @@ export async function GET(_req: NextRequest, { params }: Ctx) {
     const d = await db();
     const book = await getBook(d, id);
     if (!book) return fail(404, "not_found", "Книга не найдена.");
-    const [chapters, spentUsd] = await Promise.all([listChapters(d, id), bookSpentUsd(d, id)]);
-    return json({ book, chapters, spentUsd });
+    const [chapters, spentUsd, ready] = await Promise.all([listChapters(d, id), bookSpentUsd(d, id), listRefHeads(d, id)]);
+    return json({ book, chapters, spentUsd, ready });
   } catch (e) {
     return serverError(e);
   }
