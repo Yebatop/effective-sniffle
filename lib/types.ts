@@ -272,11 +272,15 @@ export interface ChapterView {
   position: { paragraphIdx: number } | null;
   /** Оценка цены перевода этой главы текущей моделью, ₽ и $. */
   estimate: { usd: number; rub: number; model: ModelId } | null;
+  /** Есть глава готового перевода с тем же номером — её можно читать вместо платного перевода. */
+  readyHref?: string | null;
 }
 export interface NeighborView {
   chapterId: string | null; // уже взята в библиотеку
   url: string | null; // адрес на сайте, если известен
   translated: boolean;
+  /** Своего перевода нет, а глава готового перевода с этим номером есть — читать её. */
+  readyHref?: string | null;
 }
 
 /** POST /api/chapters/:id/translate */
@@ -430,4 +434,21 @@ export interface RefSummary {
   /** Цена сбора глоссария сейчас, $ (оценка сверху). */
   estimateUsd: number;
   job: GlossaryJob | null;
+}
+
+/** Глава готового перевода в оглавлении книги. */
+export interface ReadyHead {
+  number: number;
+  title: string;
+  words: number;
+}
+
+/** GET /api/books/:id/ready/:number — глава готового перевода для чтения. */
+export interface ReadyView {
+  book: { id: string; title: string };
+  chapter: { number: number; title: string; paragraphs: string[]; words: number; url: string | null };
+  prev: { number: number; href: string; kind: "own" | "ready" | "source" } | null;
+  next: { number: number; href: string; kind: "own" | "ready" | "source" } | null;
+  /** Своя глава с тем же номером (английская или уже переведённая), если есть. */
+  own: { href: string; translated: boolean } | null;
 }

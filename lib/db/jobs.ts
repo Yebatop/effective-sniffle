@@ -172,6 +172,13 @@ export async function latestJobForChapter(d: Db, chapterId: string): Promise<Job
   return r.rows[0] ? toJob(r.rows[0]) : null;
 }
 
+/** Главы из списка, перевод которых хоть раз запускали. */
+export async function startedChapterIds(d: Db, chapterIds: string[]): Promise<Set<string>> {
+  if (chapterIds.length === 0) return new Set();
+  const r = await d.query("select distinct chapter_id from jobs where chapter_id = any($1::uuid[])", [chapterIds]);
+  return new Set(r.rows.map((row) => String(row.chapter_id)));
+}
+
 /** Задачи running с истёкшей арендой и queued старше минуты — для перезапуска кроном. */
 export async function staleJobs(d: Db): Promise<Job[]> {
   const r = await d.query(

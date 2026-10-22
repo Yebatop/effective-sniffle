@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errorText, getSettingsCached, type BookDetail, type BookPatch } from "@/lib/client/api";
 import { num, plural, rub } from "@/lib/client/format";
 import type { Book, Gender, RefSummary, Register } from "@/lib/types";
+import { tocRows } from "@/lib/client/toc";
 import Cover from "../Cover";
 import { BackLink, ErrorNote, Loading } from "../bits";
 
@@ -48,6 +49,10 @@ export default function BookScreen({ bookId }: { bookId: string }) {
       return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
     });
   }, [data]);
+
+  // Оглавление: свои главы и главы готового перевода, по номеру. На один
+  // номер — одна строка: свой перевод, иначе готовый, иначе глава без перевода.
+  const rows = useMemo(() => (data ? tocRows(data.book.id, chapters, data.ready ?? []) : []), [data, chapters]);
 
   if (error) {
     return (
@@ -96,21 +101,23 @@ export default function BookScreen({ bookId }: { bookId: string }) {
       <div className="stack-lg">
         <section className="stack-sm" aria-label="Оглавление">
           <h2 className="label">Главы</h2>
-          {chapters.length === 0 ? (
+          {rows.length === 0 ? (
             <p className="p">
               В книге пока нет глав. <Link href="/add">Добавить главу</Link>
             </p>
           ) : (
             <ul className="chapter-list">
-              {chapters.map((c) => (
-                <li key={c.id}>
-                  <Link href={`/read/${encodeURIComponent(c.id)}`}>
-                    <span className="chapter-num">{c.number !== null ? c.number : "—"}</span>
+              {rows.map((r) => (
+                <li key={r.key}>
+                  <Link href={r.href}>
+                    <span className="chapter-num">{r.number !== null ? r.number : "—"}</span>
                     <span className="grow" style={{ overflowWrap: "anywhere" }}>
-                      {c.titleSrc || "Без названия"}
+                      {r.title || "Без названия"}
                     </span>
-                    {c.translated ? (
+                    {r.kind === "own" ? (
                       <span className="chapter-mark done">переведена ✓</span>
+                    ) : r.kind === "ready" ? (
+                      <span className="chapter-mark done">готовый перевод</span>
                     ) : (
                       <span className="chapter-mark">нет перевода</span>
                     )}
@@ -133,7 +140,7 @@ export default function BookScreen({ bookId }: { bookId: string }) {
           </div>
         </Link>
 
-        <ReadyTranslation bookId={book.id} usdRub={usdRub} />
+        <ReadyTranslation bookId={book.id} usdRub={usdRub} onRemoved={() => setReload((n) => n + 1)} />
 
         <BookSettings book={book} onSaved={(b) => setData((d) => (d ? { ...d, book: { ...d.book, ...b } } : d))} />
       </div>
@@ -271,7 +278,7 @@ const LIVE = ["queued", "running"];
  * Готовый перевод: главы чужого русского перевода, собранные кнопкой «Т»,
  * и сбор глоссария по ним (с ценой до запуска и ходом работы).
  */
-function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number | null }) {
+function ReadyTranslation({ bookId, usdRub, onRemoved }: { bookId: string; usdRub: number | null; onRemoved: () => void }) {
   const [s, setS] = useState<RefSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -386,7 +393,12 @@ function ReadyTranslation({ bookId, usdRub }: { bookId: string; usdRub: number |
           className="btn btn-quiet"
           disabled={busy || live}
           onClick={() => {
-            if (window.confirm("Убрать главы готового перевода из Толмача? Глоссарий останется.")) void act(() => api.deleteReference(bookId));
+            if (!window.confirm("Убрать главы готового перевода из Толмача? Глоссарий останется.")) return;
+            void act(async () => {
+              await api.deleteReference(bookId);
+              // Оглавление книги держит готовые главы — перечитать.
+              onRemoved();
+            });
           }}
         >
           Убрать готовый перевод

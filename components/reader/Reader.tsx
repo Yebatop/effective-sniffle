@@ -170,11 +170,12 @@ export default function Reader({ chapterId }: { chapterId: string }) {
     }
   }, [chapterId, settings]);
 
-  // Автостарт: только для главы, которую ещё ни разу не пробовали перевести.
+  // Автостарт: только для главы, которую ещё ни разу не пробовали перевести
+  // и у которой нет бесплатного готового перевода (тогда — карточка с выбором).
   useEffect(() => {
     if (!view || !settings || !settings.autostart || !settings.translateModel) return;
     if (autoStartedFor.current === chapterId) return;
-    if (view.translation || view.job) return;
+    if (view.translation || view.job || view.readyHref) return;
     autoStartedFor.current = chapterId;
     void startTranslate();
   }, [view, settings, chapterId, startTranslate]);
@@ -514,6 +515,11 @@ export default function Reader({ chapterId }: { chapterId: string }) {
         {showStart && (
           <section className="card start-card" aria-label="Перевод главы">
             <p className="p">Эта глава ещё не переведена.</p>
+            {view.readyHref && (
+              <Link className="btn btn-primary btn-big btn-block" href={view.readyHref}>
+                Читать готовый перевод · бесплатно
+              </Link>
+            )}
             {estimateText && (
               <div>
                 <div className="start-price">{estimateText}</div>
@@ -529,11 +535,11 @@ export default function Reader({ chapterId }: { chapterId: string }) {
             ) : (
               <button
                 type="button"
-                className="btn btn-primary btn-big btn-block"
+                className={view.readyHref ? "btn btn-big btn-block" : "btn btn-primary btn-big btn-block"}
                 onClick={() => void startTranslate()}
                 disabled={starting}
               >
-                Перевести
+                {view.readyHref ? "Перевести самому" : "Перевести"}
               </button>
             )}
             <div className="row">

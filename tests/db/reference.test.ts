@@ -1,8 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { testDb, type Db } from "@/lib/db/client";
-import { importChapter } from "@/lib/db/books";
+import { importChapter, listChapters } from "@/lib/db/books";
+import { createOrGetJob, startedChapterIds } from "@/lib/db/jobs";
 import {
   appendRefChapterPart,
+  getRefChapterByNumber,
+  listRefHeads,
+  refNumbers,
   deleteReference,
   linkRefTerms,
   listRefBooks,
@@ -75,6 +79,41 @@ describe("главы готового перевода", () => {
     expect(await refTail(d, bookId, 2, 2)).toEqual(["Абзац 2.2", "Абзац 2.3"]);
     expect(await refTail(d, bookId, 9, 2)).toEqual([]);
     expect((await listRefBooks(d)).find((b) => b.id === bookId)).toMatchObject({ chapters: 2, refChapters: 3 });
+  });
+});
+
+describe("чтение готового перевода", () => {
+  test("оглавление без текста и глава с текстом по номеру", async () => {
+    const bookId = await book();
+    await upsertRefChapter(d, bookId, { number: 2, title: "Глава 2. Колодец", paragraphs: ["Караван ждал.", "Одран считал."], url: "https://ranobe.example/c2" });
+    await upsertRefChapter(d, bookId, { number: 1, title: "Глава 1", paragraphs: ["Начало пути."], url: null });
+    expect(await listRefHeads(d, bookId)).toEqual([
+      { number: 1, title: "Глава 1", words: 2 },
+      { number: 2, title: "Глава 2. Колодец", words: 4 },
+    ]);
+    expect([...(await refNumbers(d, bookId))].sort()).toEqual([1, 2]);
+    expect(await getRefChapterByNumber(d, bookId, 2)).toEqual({
+      number: 2,
+      title: "Глава 2. Колодец",
+      paragraphs: ["Караван ждал.", "Одран считал."],
+      words: 4,
+      url: "https://ranobe.example/c2",
+    });
+    expect(await getRefChapterByNumber(d, bookId, 9)).toBeNull();
+  });
+
+  test("глава с начатым переводом помечена started — её готовый перевод не заслонит", async () => {
+    const bookId = await book();
+    const { chapter: c3 } = await importChapter(d, { ...chapter(3), source: "button", bookId });
+    expect((await listChapters(d, bookId)).map((c) => c.started)).toEqual([false, false]);
+    await createOrGetJob(d, { chapterId: c3.id, model: "claude-haiku-5-5", effort: "low" });
+    const list = await listChapters(d, bookId);
+    expect(list.map((c) => [c.number, c.started])).toEqual([
+      [2, false],
+      [3, true],
+    ]);
+    expect([...(await startedChapterIds(d, list.map((c) => c.id)))]).toEqual([c3.id]);
+    expect((await startedChapterIds(d, [])).size).toBe(0);
   });
 });
 

@@ -225,7 +225,7 @@ create index if not exists login_attempts_ip on login_attempts(ip, created_at);
 
 -- Главы чужого готового перевода на русский (их собирает кнопка «Т» на
 -- русском сайте). Нужны для глоссария и как образец стиля перед первой
--- своей главой; в читалке не показываются.
+-- своей главой; читаются в отдельной читалке готового перевода.
 create table if not exists ref_chapters (
   id uuid primary key default gen_random_uuid(),
   book_id uuid not null references books(id) on delete cascade,

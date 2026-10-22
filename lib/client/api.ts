@@ -23,6 +23,8 @@ import type {
   ImportResponse,
   JobPoll,
   PositionRequest,
+  ReadyHead,
+  ReadyView,
   RefSummary,
   RefTerm,
   GlossaryJob,
@@ -45,8 +47,10 @@ export interface LoginResponse {
 
 export interface BookDetail {
   book: Book;
-  chapters: Array<Chapter & { translated: boolean }>;
+  chapters: Array<Chapter & { translated: boolean; started?: boolean }>;
   spentUsd: number;
+  /** Главы готового перевода (без текста). */
+  ready?: ReadyHead[];
 }
 
 export type BookPatch = Partial<Pick<Book, "title" | "register" | "narratorPerson" | "narratorGender" | "honorifics">>;
@@ -271,6 +275,7 @@ export function createApi(partial: Partial<ApiDeps> = {}) {
     patchAddress: (addressId: string, form: "ty" | "vy") =>
       request<{ ok: boolean }>("PATCH", `/api/addresses/${id(addressId)}`, { form }),
     reference: (bookId: string) => request<RefSummary>("GET", `/api/books/${id(bookId)}/reference`),
+    ready: (bookId: string, number: number) => request<ReadyView>("GET", `/api/books/${id(bookId)}/ready/${number}`),
     deleteReference: (bookId: string) => request<{ ok: boolean }>("DELETE", `/api/books/${id(bookId)}/reference`),
     startGlossary: (bookId: string) =>
       request<{ job: GlossaryJob; created: boolean }>("POST", `/api/books/${id(bookId)}/reference/glossary`, {}),

@@ -50,7 +50,7 @@ export default function NeighborNav({
 
   // Цена следующей главы: её длина известна только серверу — спросим один раз.
   useEffect(() => {
-    if (priceAsked.current || !next.chapterId || next.translated || !settings) return;
+    if (priceAsked.current || !next.chapterId || next.translated || next.readyHref || !settings) return;
     priceAsked.current = true;
     api
       .chapter(next.chapterId)
@@ -59,7 +59,7 @@ export default function NeighborNav({
         else setNextPrice(estimateRub(settings.translateModel, v.chapter.words, settings.usdRub, settings.translateEffort, settings.extractModel));
       })
       .catch(() => undefined);
-  }, [next.chapterId, next.translated, settings]);
+  }, [next.chapterId, next.translated, next.readyHref, settings]);
 
   async function take(which: "next" | "prev", url: string) {
     setBusy(which);
@@ -100,14 +100,17 @@ export default function NeighborNav({
     }
   }
 
-  const nextHref = next.chapterId ? `/read/${encodeURIComponent(next.chapterId)}` : null;
-  const prevHref = prev.chapterId ? `/read/${encodeURIComponent(prev.chapterId)}` : null;
+  // Своего перевода у соседа нет, а готовый есть — читать готовый (бесплатно).
+  const nextReady = !next.translated && next.readyHref ? next.readyHref : null;
+  const prevReady = !prev.translated && prev.readyHref ? prev.readyHref : null;
+  const nextHref = nextReady ?? (next.chapterId ? `/read/${encodeURIComponent(next.chapterId)}` : null);
+  const prevHref = prevReady ?? (prev.chapterId ? `/read/${encodeURIComponent(prev.chapterId)}` : null);
 
   return (
     <nav className="chapter-end" aria-label="Соседние главы">
       {nextHref ? (
         <Link className="btn btn-primary btn-big btn-block" href={nextHref}>
-          {next.translated ? "Дальше →" : nextPrice ? `Дальше · перевести ${nextPrice}` : "Дальше · перевести"}
+          {next.translated || nextReady ? "Дальше →" : nextPrice ? `Дальше · перевести ${nextPrice}` : "Дальше · перевести"}
         </Link>
       ) : next.url ? (
         <button
